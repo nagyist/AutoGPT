@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from email.utils import parseaddr
 from typing import List
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema
 from backend.data.model import SchemaField
+from backend.util.settings import Settings
 
 from ._auth import (
     GOOGLE_OAUTH_IS_CONFIGURED,
@@ -127,11 +129,13 @@ class GmailReadBlock(Block):
             },
         )
 
-    def run(
+    async def run(
         self, input_data: Input, *, credentials: GoogleCredentials, **kwargs
     ) -> BlockOutput:
-        service = self._build_service(credentials, **kwargs)
-        messages = self._read_emails(service, input_data.query, input_data.max_results)
+        service = GmailReadBlock._build_service(credentials, **kwargs)
+        messages = await asyncio.to_thread(
+            self._read_emails, service, input_data.query, input_data.max_results
+        )
         for email in messages:
             yield "email", email
         yield "emails", messages
@@ -150,8 +154,8 @@ class GmailReadBlock(Block):
                 else None
             ),
             token_uri="https://oauth2.googleapis.com/token",
-            client_id=kwargs.get("client_id"),
-            client_secret=kwargs.get("client_secret"),
+            client_id=Settings().secrets.google_client_id,
+            client_secret=Settings().secrets.google_client_secret,
             scopes=credentials.scopes,
         )
         return build("gmail", "v1", credentials=creds)
@@ -190,7 +194,7 @@ class GmailReadBlock(Block):
                 from_=parseaddr(headers.get("from", ""))[1],
                 to=parseaddr(headers.get("to", ""))[1],
                 date=headers.get("date", ""),
-                body=self._get_email_body(msg),
+                body=self._get_email_body(msg, service),
                 sizeEstimate=msg["sizeEstimate"],
                 attachments=attachments,
             )
@@ -198,19 +202,81 @@ class GmailReadBlock(Block):
 
         return email_data
 
-    def _get_email_body(self, msg):
-        if "parts" in msg["payload"]:
-            for part in msg["payload"]["parts"]:
-                if part["mimeType"] == "text/plain":
-                    return base64.urlsafe_b64decode(part["body"]["data"]).decode(
-                        "utf-8"
-                    )
-        elif msg["payload"]["mimeType"] == "text/plain":
-            return base64.urlsafe_b64decode(msg["payload"]["body"]["data"]).decode(
-                "utf-8"
-            )
+    def _get_email_body(self, msg, service):
+        """Extract email body content with support for multipart messages and HTML conversion."""
+        text = self._walk_for_body(msg["payload"], msg["id"], service)
+        return text or "This email does not contain a readable body."
 
-        return "This email does not contain a text body."
+    def _walk_for_body(self, part, msg_id, service, depth=0):
+        """Recursively walk through email parts to find readable body content."""
+        # Prevent infinite recursion by limiting depth
+        if depth > 10:
+            return None
+
+        mime_type = part.get("mimeType", "")
+        body = part.get("body", {})
+
+        # Handle text/plain content
+        if mime_type == "text/plain" and body.get("data"):
+            return self._decode_base64(body["data"])
+
+        # Handle text/html content (convert to plain text)
+        if mime_type == "text/html" and body.get("data"):
+            html_content = self._decode_base64(body["data"])
+            if html_content:
+                try:
+                    import html2text
+
+                    h = html2text.HTML2Text()
+                    h.ignore_links = False
+                    h.ignore_images = True
+                    return h.handle(html_content)
+                except ImportError:
+                    # Fallback: return raw HTML if html2text is not available
+                    return html_content
+
+        # Handle content stored as attachment
+        if body.get("attachmentId"):
+            attachment_data = self._download_attachment_body(
+                body["attachmentId"], msg_id, service
+            )
+            if attachment_data:
+                return self._decode_base64(attachment_data)
+
+        # Recursively search in parts
+        for sub_part in part.get("parts", []):
+            text = self._walk_for_body(sub_part, msg_id, service, depth + 1)
+            if text:
+                return text
+
+        return None
+
+    def _decode_base64(self, data):
+        """Safely decode base64 URL-safe data with proper padding."""
+        if not data:
+            return None
+        try:
+            # Add padding if necessary
+            missing_padding = len(data) % 4
+            if missing_padding:
+                data += "=" * (4 - missing_padding)
+            return base64.urlsafe_b64decode(data).decode("utf-8")
+        except Exception:
+            return None
+
+    def _download_attachment_body(self, attachment_id, msg_id, service):
+        """Download attachment content when email body is stored as attachment."""
+        try:
+            attachment = (
+                service.users()
+                .messages()
+                .attachments()
+                .get(userId="me", messageId=msg_id, id=attachment_id)
+                .execute()
+            )
+            return attachment.get("data")
+        except Exception:
+            return None
 
     def _get_attachments(self, service, message):
         attachments = []
@@ -285,14 +351,18 @@ class GmailSendBlock(Block):
             },
         )
 
-    def run(
+    async def run(
         self, input_data: Input, *, credentials: GoogleCredentials, **kwargs
     ) -> BlockOutput:
         service = GmailReadBlock._build_service(credentials, **kwargs)
-        send_result = self._send_email(
-            service, input_data.to, input_data.subject, input_data.body
+        result = await asyncio.to_thread(
+            self._send_email,
+            service,
+            input_data.to,
+            input_data.subject,
+            input_data.body,
         )
-        yield "result", send_result
+        yield "result", result
 
     def _send_email(self, service, to: str, subject: str, body: str) -> dict:
         if not to or not subject or not body:
@@ -357,12 +427,12 @@ class GmailListLabelsBlock(Block):
             },
         )
 
-    def run(
+    async def run(
         self, input_data: Input, *, credentials: GoogleCredentials, **kwargs
     ) -> BlockOutput:
         service = GmailReadBlock._build_service(credentials, **kwargs)
-        labels = self._list_labels(service)
-        yield "result", labels
+        result = await asyncio.to_thread(self._list_labels, service)
+        yield "result", result
 
     def _list_labels(self, service) -> list[dict]:
         results = service.users().labels().list(userId="me").execute()
@@ -418,11 +488,13 @@ class GmailAddLabelBlock(Block):
             },
         )
 
-    def run(
+    async def run(
         self, input_data: Input, *, credentials: GoogleCredentials, **kwargs
     ) -> BlockOutput:
         service = GmailReadBlock._build_service(credentials, **kwargs)
-        result = self._add_label(service, input_data.message_id, input_data.label_name)
+        result = await asyncio.to_thread(
+            self._add_label, service, input_data.message_id, input_data.label_name
+        )
         yield "result", result
 
     def _add_label(self, service, message_id: str, label_name: str) -> dict:
@@ -501,12 +573,12 @@ class GmailRemoveLabelBlock(Block):
             },
         )
 
-    def run(
+    async def run(
         self, input_data: Input, *, credentials: GoogleCredentials, **kwargs
     ) -> BlockOutput:
         service = GmailReadBlock._build_service(credentials, **kwargs)
-        result = self._remove_label(
-            service, input_data.message_id, input_data.label_name
+        result = await asyncio.to_thread(
+            self._remove_label, service, input_data.message_id, input_data.label_name
         )
         yield "result", result
 

@@ -165,9 +165,15 @@ package-lock.json
 
 # Allow for locally private items
 # private
-pri* 
+pri*
 # ignore
 ig*
 .github_access_token
 LICENSE.rtf
 autogpt_platform/backend/settings.py
+/.auth
+/autogpt_platform/frontend/.auth
+
+*.ign.*
+.test-contents
+.claude/settings.local.json

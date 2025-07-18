@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { setNestedProperty } from "../lib/utils";
 
 const testCases = [
@@ -99,6 +99,7 @@ test.describe("Nested Property Setter Tests", () => {
       }).toThrow("Invalid property name: __proto__");
 
       // Verify no pollution occurred
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore
       expect({}.polluted).toBeUndefined();
     });

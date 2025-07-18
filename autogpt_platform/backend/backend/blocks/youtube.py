@@ -62,9 +62,24 @@ class TranscribeYoutubeVideoBlock(Block):
 
     @staticmethod
     def get_transcript(video_id: str):
-        return YouTubeTranscriptApi.get_transcript(video_id)
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
 
-    def run(self, input_data: Input, **kwargs) -> BlockOutput:
+            if not transcript_list:
+                raise ValueError(f"No transcripts found for the video: {video_id}")
+
+            for transcript in transcript_list:
+                first_transcript = transcript_list.find_transcript(
+                    [transcript.language_code]
+                )
+                return YouTubeTranscriptApi.get_transcript(
+                    video_id, languages=[first_transcript.language_code]
+                )
+
+        except Exception:
+            raise ValueError(f"No transcripts found for the video: {video_id}")
+
+    async def run(self, input_data: Input, **kwargs) -> BlockOutput:
         video_id = self.extract_video_id(input_data.youtube_url)
         yield "video_id", video_id
 

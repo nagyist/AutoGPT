@@ -6,8 +6,9 @@ from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from .filters import BelowLevelFilter
-from .formatters import AGPTFormatter, StructuredLoggingFormatter
+from .formatters import AGPTFormatter
 
 LOG_DIR = Path(__file__).parent.parent.parent.parent / "logs"
 LOG_FILE = "activity.log"
@@ -17,12 +18,11 @@ ERROR_LOG_FILE = "error.log"
 SIMPLE_LOG_FORMAT = "%(asctime)s %(levelname)s  %(title)s%(message)s"
 
 DEBUG_LOG_FORMAT = (
-    "%(asctime)s %(levelname)s %(filename)s:%(lineno)d" "  %(title)s%(message)s"
+    "%(asctime)s %(levelname)s %(filename)s:%(lineno)d  %(title)s%(message)s"
 )
 
 
 class LoggingConfig(BaseSettings):
-
     level: str = Field(
         default="INFO",
         description="Logging level",
@@ -81,8 +81,25 @@ def configure_logging(force_cloud_logging: bool = False) -> None:
     """
 
     config = LoggingConfig()
-
     log_handlers: list[logging.Handler] = []
+
+    # Console output handlers
+    stdout = logging.StreamHandler(stream=sys.stdout)
+    stdout.setLevel(config.level)
+    stdout.addFilter(BelowLevelFilter(logging.WARNING))
+    if config.level == logging.DEBUG:
+        stdout.setFormatter(AGPTFormatter(DEBUG_LOG_FORMAT))
+    else:
+        stdout.setFormatter(AGPTFormatter(SIMPLE_LOG_FORMAT))
+
+    stderr = logging.StreamHandler()
+    stderr.setLevel(logging.WARNING)
+    if config.level == logging.DEBUG:
+        stderr.setFormatter(AGPTFormatter(DEBUG_LOG_FORMAT))
+    else:
+        stderr.setFormatter(AGPTFormatter(SIMPLE_LOG_FORMAT))
+
+    log_handlers += [stdout, stderr]
 
     # Cloud logging setup
     if config.enable_cloud_logging or force_cloud_logging:
@@ -97,28 +114,7 @@ def configure_logging(force_cloud_logging: bool = False) -> None:
             transport=SyncTransport,
         )
         cloud_handler.setLevel(config.level)
-        cloud_handler.setFormatter(StructuredLoggingFormatter())
         log_handlers.append(cloud_handler)
-        print("Cloud logging enabled")
-    else:
-        # Console output handlers
-        stdout = logging.StreamHandler(stream=sys.stdout)
-        stdout.setLevel(config.level)
-        stdout.addFilter(BelowLevelFilter(logging.WARNING))
-        if config.level == logging.DEBUG:
-            stdout.setFormatter(AGPTFormatter(DEBUG_LOG_FORMAT))
-        else:
-            stdout.setFormatter(AGPTFormatter(SIMPLE_LOG_FORMAT))
-
-        stderr = logging.StreamHandler()
-        stderr.setLevel(logging.WARNING)
-        if config.level == logging.DEBUG:
-            stderr.setFormatter(AGPTFormatter(DEBUG_LOG_FORMAT))
-        else:
-            stderr.setFormatter(AGPTFormatter(SIMPLE_LOG_FORMAT))
-
-        log_handlers += [stdout, stderr]
-        print("Console logging enabled")
 
     # File logging setup
     if config.enable_file_logging:
@@ -156,7 +152,6 @@ def configure_logging(force_cloud_logging: bool = False) -> None:
         error_log_handler.setLevel(logging.ERROR)
         error_log_handler.setFormatter(AGPTFormatter(DEBUG_LOG_FORMAT, no_color=True))
         log_handlers.append(error_log_handler)
-        print("File logging enabled")
 
     # Configure the root logger
     logging.basicConfig(

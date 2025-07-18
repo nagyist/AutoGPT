@@ -1,8 +1,10 @@
 from base64 import b64encode
+from typing import Optional
 from urllib.parse import urlencode
 
-import requests
-from autogpt_libs.supabase_integration_credentials_store import OAuth2Credentials
+from backend.data.model import OAuth2Credentials
+from backend.integrations.providers import ProviderName
+from backend.util.request import Requests
 
 from .base import BaseOAuthHandler
 
@@ -16,7 +18,7 @@ class NotionOAuthHandler(BaseOAuthHandler):
     - Notion doesn't use scopes
     """
 
-    PROVIDER_NAME = "notion"
+    PROVIDER_NAME = ProviderName.NOTION
 
     def __init__(self, client_id: str, client_secret: str, redirect_uri: str):
         self.client_id = client_id
@@ -25,7 +27,9 @@ class NotionOAuthHandler(BaseOAuthHandler):
         self.auth_base_url = "https://api.notion.com/v1/oauth/authorize"
         self.token_url = "https://api.notion.com/v1/oauth/token"
 
-    def get_login_url(self, scopes: list[str], state: str) -> str:
+    def get_login_url(
+        self, scopes: list[str], state: str, code_challenge: Optional[str]
+    ) -> str:
         params = {
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
@@ -35,8 +39,8 @@ class NotionOAuthHandler(BaseOAuthHandler):
         }
         return f"{self.auth_base_url}?{urlencode(params)}"
 
-    def exchange_code_for_tokens(
-        self, code: str, scopes: list[str]
+    async def exchange_code_for_tokens(
+        self, code: str, scopes: list[str], code_verifier: Optional[str]
     ) -> OAuth2Credentials:
         request_body = {
             "grant_type": "authorization_code",
@@ -48,8 +52,9 @@ class NotionOAuthHandler(BaseOAuthHandler):
             "Authorization": f"Basic {auth_str}",
             "Accept": "application/json",
         }
-        response = requests.post(self.token_url, json=request_body, headers=headers)
-        response.raise_for_status()
+        response = await Requests().post(
+            self.token_url, json=request_body, headers=headers
+        )
         token_data = response.json()
         # Email is only available for non-bot users
         email = (
@@ -77,11 +82,13 @@ class NotionOAuthHandler(BaseOAuthHandler):
             },
         )
 
-    def revoke_tokens(self, credentials: OAuth2Credentials) -> bool:
+    async def revoke_tokens(self, credentials: OAuth2Credentials) -> bool:
         # Notion doesn't support token revocation
         return False
 
-    def _refresh_tokens(self, credentials: OAuth2Credentials) -> OAuth2Credentials:
+    async def _refresh_tokens(
+        self, credentials: OAuth2Credentials
+    ) -> OAuth2Credentials:
         # Notion doesn't support token refresh
         return credentials
 
