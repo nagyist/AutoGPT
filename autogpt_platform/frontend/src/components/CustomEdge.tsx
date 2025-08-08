@@ -1,4 +1,10 @@
-import React, { useCallback, useContext, useEffect, useState } from "react";
+import React, {
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  useRef,
+} from "react";
 import {
   BaseEdge,
   EdgeLabelRenderer,
@@ -12,14 +18,15 @@ import "./customedge.css";
 import { X } from "lucide-react";
 import { useBezierPath } from "@/hooks/useBezierPath";
 import { FlowContext } from "./Flow";
+import { NodeExecutionResult } from "@/lib/autogpt-server-api";
 
 export type CustomEdgeData = {
   edgeColor: string;
   sourcePos?: XYPosition;
   isStatic?: boolean;
-  beadUp?: number;
-  beadDown?: number;
-  beadData?: any[];
+  beadUp: number;
+  beadDown: number;
+  beadData?: Map<string, NodeExecutionResult["status"]>;
 };
 
 type Bead = {
@@ -40,16 +47,16 @@ export function CustomEdge({
   targetY,
   markerEnd,
 }: EdgeProps<CustomEdge>) {
-  const [isHovered, setIsHovered] = useState(false);
   const [beads, setBeads] = useState<{
     beads: Bead[];
     created: number;
     destroyed: number;
   }>({ beads: [], created: 0, destroyed: 0 });
+  const beadsRef = useRef(beads);
   const { svgPath, length, getPointForT, getTForDistance } = useBezierPath(
     sourceX - 5,
     sourceY - 5,
-    targetX - 9,
+    targetX + 3,
     targetY - 5,
   );
   const { deleteElements } = useReactFlow<Node, CustomEdge>();
@@ -87,93 +94,80 @@ export function CustomEdge({
     [getTForDistance, length, visualizeBeads],
   );
 
+  beadsRef.current = beads;
   useEffect(() => {
-    if (data?.beadUp === 0 && data?.beadDown === 0) {
+    const beadUp: number = data?.beadUp ?? 0;
+    const beadDown: number = data?.beadDown ?? 0;
+
+    if (
+      beadUp === 0 &&
+      beadDown === 0 &&
+      (beads.created > 0 || beads.destroyed > 0)
+    ) {
       setBeads({ beads: [], created: 0, destroyed: 0 });
       return;
     }
 
-    const beadUp = data?.beadUp!;
-
     // Add beads
-    setBeads(({ beads, created, destroyed }) => {
-      const newBeads = [];
-      for (let i = 0; i < beadUp - created; i++) {
-        newBeads.push({ t: 0, targetT: 0, startTime: Date.now() });
-      }
-
-      const b = setTargetPositions([...beads, ...newBeads]);
-      return { beads: b, created: beadUp, destroyed };
-    });
-
-    // Remove beads if not animating
-    if (visualizeBeads !== "animate") {
+    if (beadUp > beads.created) {
       setBeads(({ beads, created, destroyed }) => {
-        let destroyedCount = 0;
+        const newBeads = [];
+        for (let i = 0; i < beadUp - created; i++) {
+          newBeads.push({ t: 0, targetT: 0, startTime: Date.now() });
+        }
 
-        const newBeads = beads
-          .map((bead) => ({ ...bead }))
-          .filter((bead, index) => {
-            const beadDown = data?.beadDown!;
-
-            // Remove always one less bead in case of static edge, so it stays at the connection point
-            const removeCount = beadDown - destroyed - (data?.isStatic ? 1 : 0);
-            if (bead.t >= bead.targetT && index < removeCount) {
-              destroyedCount++;
-              return false;
-            }
-            return true;
-          });
-
-        return {
-          beads: setTargetPositions(newBeads),
-          created,
-          destroyed: destroyed + destroyedCount,
-        };
+        const b = setTargetPositions([...beads, ...newBeads]);
+        return { beads: b, created: beadUp, destroyed };
       });
-      return;
     }
 
     // Animate and remove beads
-    const interval = setInterval(() => {
-      setBeads(({ beads, created, destroyed }) => {
-        let destroyedCount = 0;
+    const interval = setInterval(
+      ({ current: beads }) => {
+        // If there are no beads visible or moving, stop re-rendering
+        if (
+          (beadUp === beads.created && beads.created === beads.destroyed) ||
+          beads.beads.every((bead) => bead.t >= bead.targetT)
+        ) {
+          clearInterval(interval);
+          return;
+        }
 
-        const newBeads = beads
-          .map((bead) => {
-            const progressIncrement = deltaTime / animationDuration;
-            const t = Math.min(
-              bead.t + bead.targetT * progressIncrement,
-              bead.targetT,
-            );
+        setBeads(({ beads, created, destroyed }) => {
+          let destroyedCount = 0;
 
-            return {
-              ...bead,
-              t,
-            };
-          })
-          .filter((bead, index) => {
-            const beadDown = data?.beadDown!;
+          const newBeads = beads
+            .map((bead) => {
+              const progressIncrement = deltaTime / animationDuration;
+              const t = Math.min(
+                bead.t + bead.targetT * progressIncrement,
+                bead.targetT,
+              );
 
-            // Remove always one less bead in case of static edge, so it stays at the connection point
-            const removeCount = beadDown - destroyed - (data?.isStatic ? 1 : 0);
-            if (bead.t >= bead.targetT && index < removeCount) {
-              destroyedCount++;
-              return false;
-            }
-            return true;
-          });
+              return { ...bead, t };
+            })
+            .filter((bead, index) => {
+              const removeCount = beadDown - destroyed;
+              if (bead.t >= bead.targetT && index < removeCount) {
+                destroyedCount++;
+                return false;
+              }
+              return true;
+            });
 
-        return {
-          beads: setTargetPositions(newBeads),
-          created,
-          destroyed: destroyed + destroyedCount,
-        };
-      });
-    }, deltaTime);
+          return {
+            beads: setTargetPositions(newBeads),
+            created,
+            destroyed: destroyed + destroyedCount,
+          };
+        });
+      },
+      deltaTime,
+      beadsRef,
+    );
 
     return () => clearInterval(interval);
-  }, [data, setTargetPositions, visualizeBeads]);
+  }, [data?.beadUp, data?.beadDown, setTargetPositions, visualizeBeads]);
 
   const middle = getPointForT(0.5);
 
@@ -182,13 +176,7 @@ export function CustomEdge({
       <BaseEdge
         path={svgPath}
         markerEnd={markerEnd}
-        style={{
-          strokeWidth: (isHovered ? 3 : 2) + (data?.isStatic ? 0.5 : 0),
-          stroke:
-            (data?.edgeColor ?? "#555555") +
-            (selected || isHovered ? "" : "80"),
-          strokeDasharray: data?.isStatic ? "5 3" : "0",
-        }}
+        className={`transition-all duration-200 ${data?.isStatic ? "[stroke-dasharray:5_3]" : "[stroke-dasharray:0]"} [stroke-width:${data?.isStatic ? 2.5 : 2}px] hover:[stroke-width:${data?.isStatic ? 3.5 : 3}px] ${selected ? `[stroke:${data?.edgeColor ?? "#555555"}]` : `[stroke:${data?.edgeColor ?? "#555555"}80] hover:[stroke:${data?.edgeColor ?? "#555555"}]`}`}
       />
       <path
         d={svgPath}
@@ -196,8 +184,6 @@ export function CustomEdge({
         strokeOpacity={0}
         strokeWidth={20}
         className="react-flow__edge-interaction"
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
       />
       <EdgeLabelRenderer>
         <div
@@ -209,9 +195,7 @@ export function CustomEdge({
           className="edge-label-renderer"
         >
           <button
-            onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
-            className={`edge-label-button ${isHovered ? "visible" : ""}`}
+            className="edge-label-button opacity-0 transition-opacity duration-200 hover:opacity-100"
             onClick={onEdgeRemoveClick}
           >
             <X className="size-4" />

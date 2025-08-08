@@ -1,10 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
-import AutoGPTServerAPI, {
+import React, { useEffect, useState } from "react";
+import {
   Graph,
-  GraphMeta,
-  safeCopyGraph,
+  GraphExecutionMeta,
+  LibraryAgent,
 } from "@/lib/autogpt-server-api";
-import { FlowRun } from "@/lib/types";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DropdownMenu,
@@ -16,11 +15,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { ClockIcon, ExitIcon, Pencil2Icon } from "@radix-ui/react-icons";
+import {
+  ClockIcon,
+  ExitIcon,
+  Pencil2Icon,
+  PlayIcon,
+  TrashIcon,
+} from "@radix-ui/react-icons";
 import Link from "next/link";
 import { exportAsJSONFile } from "@/lib/utils";
 import { FlowRunsStats } from "@/components/monitor/index";
-import { Trash2Icon } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -29,16 +33,26 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
+import useAgentGraph from "@/hooks/useAgentGraph";
+import { useBackendAPI } from "@/lib/autogpt-server-api/context";
+import { RunnerInputDialog } from "@/components/runner-ui/RunnerInputUI";
 
 export const FlowInfo: React.FC<
   React.HTMLAttributes<HTMLDivElement> & {
-    flow: GraphMeta;
-    flowRuns: FlowRun[];
+    flow: LibraryAgent;
+    executions: GraphExecutionMeta[];
     flowVersion?: number | "all";
     refresh: () => void;
   }
-> = ({ flow, flowRuns, flowVersion, refresh, ...props }) => {
-  const api = useMemo(() => new AutoGPTServerAPI(), []);
+> = ({ flow, executions, flowVersion, refresh, ...props }) => {
+  const { savedAgent, saveAndRun, stopRun, isRunning } = useAgentGraph(
+    flow.graph_id,
+    flow.graph_version,
+    undefined,
+    false,
+  );
+
+  const api = useBackendAPI();
 
   const [flowVersions, setFlowVersions] = useState<Graph[] | null>(null);
   const [selectedVersion, setSelectedFlowVersion] = useState(
@@ -46,27 +60,41 @@ export const FlowInfo: React.FC<
   );
   const selectedFlowVersion: Graph | undefined = flowVersions?.find(
     (v) =>
-      v.version == (selectedVersion == "all" ? flow.version : selectedVersion),
+      v.version ==
+      (selectedVersion == "all" ? flow.graph_version : selectedVersion),
   );
 
+  const hasInputs = Object.keys(flow.input_schema.properties).length > 0;
+  const hasCredentialsInputs =
+    Object.keys(flow.credentials_input_schema.properties).length > 0;
+
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isRunDialogOpen, setIsRunDialogOpen] = useState(false);
+  const isDisabled = !selectedFlowVersion;
 
   useEffect(() => {
-    api.getGraphAllVersions(flow.id).then((result) => setFlowVersions(result));
-  }, [flow.id, api]);
+    api
+      .getGraphAllVersions(flow.graph_id)
+      .then((result) => setFlowVersions(result));
+  }, [flow.graph_id, api]);
+
+  const openRunDialog = () => setIsRunDialogOpen(true);
+
+  const runOrOpenInput = () => {
+    if (hasInputs || hasCredentialsInputs) {
+      openRunDialog();
+    } else {
+      saveAndRun({}, {});
+    }
+  };
 
   return (
     <Card {...props}>
-      <CardHeader className="flex-row justify-between space-x-3 space-y-0">
-        <div>
-          <CardTitle>
-            {flow.name} <span className="font-light">v{flow.version}</span>
-          </CardTitle>
-          <p className="mt-2">
-            Agent ID: <code>{flow.id}</code>
-          </p>
-        </div>
-        <div className="flex items-start space-x-2">
+      <CardHeader className="">
+        <CardTitle>
+          {flow.name} <span className="font-light">v{flow.graph_version}</span>
+        </CardTitle>
+        <div className="flex flex-col space-y-2 py-6">
           {(flowVersions?.length ?? 0) > 1 && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -82,7 +110,7 @@ export const FlowInfo: React.FC<
                 <DropdownMenuSeparator />
                 <DropdownMenuRadioGroup
                   value={String(selectedVersion)}
-                  onValueChange={(choice) =>
+                  onValueChange={(choice: string) =>
                     setSelectedFlowVersion(
                       choice == "all" ? choice : Number(choice),
                     )
@@ -104,42 +132,65 @@ export const FlowInfo: React.FC<
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          <Link
-            className={buttonVariants({ variant: "outline" })}
-            href={`/build?flowID=${flow.id}`}
-          >
-            <Pencil2Icon />
-          </Link>
+          {flow.can_access_graph && (
+            <Link
+              className={buttonVariants({ variant: "default" })}
+              href={`/build?flowID=${flow.graph_id}&flowVersion=${flow.graph_version}`}
+            >
+              <Pencil2Icon className="mr-2" />
+              Open in Builder
+            </Link>
+          )}
+          {flow.can_access_graph && (
+            <Button
+              variant="outline"
+              className="px-2.5"
+              title="Export to a JSON-file"
+              data-testid="export-button"
+              onClick={() =>
+                api
+                  .getGraph(flow.graph_id, selectedFlowVersion!.version, true)
+                  .then((graph) =>
+                    exportAsJSONFile(
+                      graph,
+                      `${flow.name}_v${selectedFlowVersion!.version}.json`,
+                    ),
+                  )
+              }
+            >
+              <ExitIcon className="mr-2" /> Export
+            </Button>
+          )}
           <Button
-            variant="outline"
-            className="px-2.5"
-            title="Export to a JSON-file"
-            onClick={async () =>
-              exportAsJSONFile(
-                safeCopyGraph(
-                  flowVersions!.find(
-                    (v) => v.version == selectedFlowVersion!.version,
-                  )!,
-                  await api.getBlocks(),
-                ),
-                `${flow.name}_v${selectedFlowVersion!.version}.json`,
-              )
-            }
+            variant="secondary"
+            className="bg-purple-500 text-white hover:bg-purple-700"
+            onClick={!isRunning ? runOrOpenInput : stopRun}
+            disabled={isDisabled}
+            title={!isRunning ? "Run Agent" : "Stop Agent"}
           >
-            <ExitIcon />
+            <PlayIcon className="mr-2" />
+            {isRunning ? "Stop Agent" : "Run Agent"}
           </Button>
-          <Button variant="outline" onClick={() => setIsDeleteModalOpen(true)}>
-            <Trash2Icon className="h-full" />
-          </Button>
+          {flow.can_access_graph && (
+            <Button
+              variant="destructive"
+              onClick={() => setIsDeleteModalOpen(true)}
+              data-testid="delete-button"
+            >
+              <TrashIcon className="mr-2" />
+              Delete Agent
+            </Button>
+          )}
         </div>
       </CardHeader>
       <CardContent>
         <FlowRunsStats
-          flows={[selectedFlowVersion ?? flow]}
-          flowRuns={flowRuns.filter(
-            (r) =>
-              r.graphID == flow.id &&
-              (selectedVersion == "all" || r.graphVersion == selectedVersion),
+          flows={[flow]}
+          executions={executions.filter(
+            (execution) =>
+              execution.graph_id == flow.graph_id &&
+              (selectedVersion == "all" ||
+                execution.graph_version == selectedVersion),
           )}
         />
       </CardContent>
@@ -162,7 +213,7 @@ export const FlowInfo: React.FC<
             <Button
               variant="destructive"
               onClick={() => {
-                api.deleteGraph(flow.id).then(() => {
+                api.deleteLibraryAgent(flow.id).then(() => {
                   setIsDeleteModalOpen(false);
                   refresh();
                 });
@@ -173,6 +224,14 @@ export const FlowInfo: React.FC<
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {savedAgent && (
+        <RunnerInputDialog
+          isOpen={isRunDialogOpen}
+          doClose={() => setIsRunDialogOpen(false)}
+          graph={savedAgent}
+          doRun={saveAndRun}
+        />
+      )}
     </Card>
   );
 };

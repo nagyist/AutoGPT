@@ -1,135 +1,113 @@
 import React, {
   useState,
-  useCallback,
   forwardRef,
   useImperativeHandle,
+  useMemo,
 } from "react";
-import RunnerInputUI from "./runner-ui/RunnerInputUI";
-import RunnerOutputUI from "./runner-ui/RunnerOutputUI";
 import { Node } from "@xyflow/react";
-import { filterBlocksByType } from "@/lib/utils";
-import { BlockIORootSchema, BlockUIType } from "@/lib/autogpt-server-api/types";
+import { CustomNodeData } from "@/components/CustomNode";
+import { RunnerInputDialog } from "@/components/runner-ui/RunnerInputUI";
+import {
+  BlockUIType,
+  CredentialsMetaInput,
+  GraphMeta,
+} from "@/lib/autogpt-server-api/types";
+import RunnerOutputUI, {
+  OutputNodeInfo,
+} from "@/components/runner-ui/RunnerOutputUI";
 
 interface RunnerUIWrapperProps {
-  nodes: Node[];
-  setNodes: React.Dispatch<React.SetStateAction<Node[]>>;
-  isRunning: boolean;
-  requestSaveAndRun: () => void;
+  graph: GraphMeta;
+  nodes: Node<CustomNodeData>[];
+  graphExecutionError?: string | null;
+  saveAndRun: (
+    inputs: Record<string, any>,
+    credentialsInputs: Record<string, CredentialsMetaInput>,
+  ) => void;
+  createRunSchedule: (
+    cronExpression: string,
+    scheduleName: string,
+    inputs: Record<string, any>,
+    credentialsInputs: Record<string, CredentialsMetaInput>,
+  ) => Promise<void>;
 }
 
 export interface RunnerUIWrapperRef {
-  openRunnerInput: () => void;
+  openRunInputDialog: () => void;
   openRunnerOutput: () => void;
   runOrOpenInput: () => void;
 }
 
 const RunnerUIWrapper = forwardRef<RunnerUIWrapperRef, RunnerUIWrapperProps>(
-  ({ nodes, setNodes, isRunning, requestSaveAndRun }, ref) => {
-    const [isRunnerInputOpen, setIsRunnerInputOpen] = useState(false);
+  (
+    { graph, nodes, graphExecutionError, saveAndRun, createRunSchedule },
+    ref,
+  ) => {
+    const [isRunInputDialogOpen, setIsRunInputDialogOpen] = useState(false);
     const [isRunnerOutputOpen, setIsRunnerOutputOpen] = useState(false);
 
-    const getBlockInputsAndOutputs = useCallback(() => {
-      const inputBlocks = filterBlocksByType(
-        nodes,
-        (node) => node.data.uiType === BlockUIType.INPUT,
-      );
+    const graphInputs = graph.input_schema.properties;
 
-      const outputBlocks = filterBlocksByType(
-        nodes,
+    const graphOutputs = useMemo((): OutputNodeInfo[] => {
+      const outputNodes = nodes.filter(
         (node) => node.data.uiType === BlockUIType.OUTPUT,
       );
 
-      const inputs = inputBlocks.map((node) => ({
-        id: node.id,
-        type: "input" as const,
-        inputSchema: node.data.inputSchema as BlockIORootSchema,
-        hardcodedValues: {
-          name: (node.data.hardcodedValues as any).name || "",
-          description: (node.data.hardcodedValues as any).description || "",
-          value: (node.data.hardcodedValues as any).value,
-          placeholder_values:
-            (node.data.hardcodedValues as any).placeholder_values || [],
-          limit_to_placeholder_values:
-            (node.data.hardcodedValues as any).limit_to_placeholder_values ||
-            false,
-        },
-      }));
-
-      const outputs = outputBlocks.map((node) => ({
-        id: node.id,
-        type: "output" as const,
-        outputSchema: node.data.outputSchema as BlockIORootSchema,
-        hardcodedValues: {
-          name: (node.data.hardcodedValues as any).name || "Output",
-          description:
-            (node.data.hardcodedValues as any).description ||
-            "Output from the agent",
-          value: (node.data.hardcodedValues as any).value,
-        },
-        result: (node.data.executionResults as any)?.at(-1)?.data?.output,
-      }));
-
-      return { inputs, outputs };
+      return outputNodes.map(
+        (node) =>
+          ({
+            metadata: {
+              name: node.data.hardcodedValues.name || "Output",
+              description:
+                node.data.hardcodedValues.description ||
+                "Output from the agent",
+            },
+            result:
+              (node.data.executionResults as any)
+                ?.map((result: any) => result?.data?.output)
+                .join("\n--\n") || "No output yet",
+          }) satisfies OutputNodeInfo,
+      );
     }, [nodes]);
 
-    const handleInputChange = useCallback(
-      (nodeId: string, field: string, value: string) => {
-        setNodes((nds) =>
-          nds.map((node) => {
-            if (node.id === nodeId) {
-              return {
-                ...node,
-                data: {
-                  ...node.data,
-                  hardcodedValues: {
-                    ...(node.data.hardcodedValues as any),
-                    [field]: value,
-                  },
-                },
-              };
-            }
-            return node;
-          }),
-        );
-      },
-      [setNodes],
-    );
-
-    const openRunnerInput = () => setIsRunnerInputOpen(true);
+    const openRunInputDialog = () => setIsRunInputDialogOpen(true);
     const openRunnerOutput = () => setIsRunnerOutputOpen(true);
 
     const runOrOpenInput = () => {
-      const { inputs } = getBlockInputsAndOutputs();
-      if (inputs.length > 0) {
-        openRunnerInput();
+      if (
+        Object.keys(graphInputs).length > 0 ||
+        Object.keys(graph.credentials_input_schema.properties).length > 0
+      ) {
+        openRunInputDialog();
       } else {
-        requestSaveAndRun();
+        saveAndRun({}, {});
       }
     };
 
-    useImperativeHandle(ref, () => ({
-      openRunnerInput,
-      openRunnerOutput,
-      runOrOpenInput,
-    }));
+    useImperativeHandle(
+      ref,
+      () =>
+        ({
+          openRunInputDialog,
+          openRunnerOutput,
+          runOrOpenInput,
+        }) satisfies RunnerUIWrapperRef,
+    );
 
     return (
       <>
-        <RunnerInputUI
-          isOpen={isRunnerInputOpen}
-          onClose={() => setIsRunnerInputOpen(false)}
-          blockInputs={getBlockInputsAndOutputs().inputs}
-          onInputChange={handleInputChange}
-          onRun={() => {
-            setIsRunnerInputOpen(false);
-            requestSaveAndRun();
-          }}
-          isRunning={isRunning}
+        <RunnerInputDialog
+          isOpen={isRunInputDialogOpen}
+          doClose={() => setIsRunInputDialogOpen(false)}
+          graph={graph}
+          doRun={saveAndRun}
+          doCreateSchedule={createRunSchedule}
         />
         <RunnerOutputUI
           isOpen={isRunnerOutputOpen}
-          onClose={() => setIsRunnerOutputOpen(false)}
-          blockOutputs={getBlockInputsAndOutputs().outputs}
+          doClose={() => setIsRunnerOutputOpen(false)}
+          outputs={graphOutputs}
+          graphExecutionError={graphExecutionError}
         />
       </>
     );
