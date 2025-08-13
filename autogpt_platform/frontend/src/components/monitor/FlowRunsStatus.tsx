@@ -1,6 +1,5 @@
 import React, { useState } from "react";
-import { GraphMeta } from "@/lib/autogpt-server-api";
-import { FlowRun } from "@/lib/types";
+import { GraphExecutionMeta, LibraryAgent } from "@/lib/autogpt-server-api";
 import { CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,11 +11,11 @@ import { Calendar } from "@/components/ui/calendar";
 import { FlowRunsTimeline } from "@/components/monitor/FlowRunsTimeline";
 
 export const FlowRunsStatus: React.FC<{
-  flows: GraphMeta[];
-  flowRuns: FlowRun[];
+  flows: LibraryAgent[];
+  executions: GraphExecutionMeta[];
   title?: string;
   className?: string;
-}> = ({ flows, flowRuns, title, className }) => {
+}> = ({ flows, executions: executions, title, className }) => {
   /* "dateMin": since the first flow in the dataset
    * number > 0: custom date (unix timestamp)
    * number < 0: offset relative to Date.now() (in seconds) */
@@ -30,14 +29,14 @@ export const FlowRunsStatus: React.FC<{
         : statsSince;
   const filteredFlowRuns =
     statsSinceTimestamp != null
-      ? flowRuns.filter((fr) => fr.startTime > statsSinceTimestamp)
-      : flowRuns;
+      ? executions.filter((fr) => fr.started_at.getTime() > statsSinceTimestamp)
+      : executions;
 
   return (
     <div className={className}>
       <div className="flex flex-row items-center justify-between">
         <CardTitle>{title || "Stats"}</CardTitle>
-        <div className="flex space-x-2">
+        <div className="flex flex-wrap space-x-2">
           <Button
             variant="outline"
             size="sm"
@@ -94,7 +93,7 @@ export const FlowRunsStatus: React.FC<{
       </div>
       <FlowRunsTimeline
         flows={flows}
-        flowRuns={flowRuns}
+        executions={executions}
         dataMin={statsSince}
         className="mt-3"
       />
@@ -105,10 +104,22 @@ export const FlowRunsStatus: React.FC<{
         </p>
         <p>
           <strong>Total run time:</strong>{" "}
-          {filteredFlowRuns.reduce((total, run) => total + run.totalRunTime, 0)}{" "}
+          {filteredFlowRuns.reduce(
+            (total, run) => total + (run.stats?.node_exec_time ?? 0),
+            0,
+          )}{" "}
           seconds
         </p>
-        {/* <p><strong>Total cost:</strong> €1,23</p> */}
+        {filteredFlowRuns.some((r) => r.stats) && (
+          <p>
+            <strong>Total cost:</strong>{" "}
+            {filteredFlowRuns.reduce(
+              (total, run) => total + (run.stats?.cost ?? 0),
+              0,
+            )}{" "}
+            seconds
+          </p>
+        )}
       </div>
     </div>
   );

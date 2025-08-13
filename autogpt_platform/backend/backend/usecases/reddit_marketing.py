@@ -1,9 +1,8 @@
-from prisma.models import User
-
 from backend.blocks.llm import AIStructuredResponseGeneratorBlock
 from backend.blocks.reddit import GetRedditPostsBlock, PostRedditCommentBlock
 from backend.blocks.text import FillTextTemplateBlock, MatchTextPatternBlock
 from backend.data.graph import Graph, Link, Node, create_graph
+from backend.data.model import User
 from backend.data.user import get_or_create_user
 from backend.util.test import SpinTestServer, wait_execution
 
@@ -157,10 +156,12 @@ async def reddit_marketing_agent():
         test_graph = await create_graph(create_test_graph(), user_id=test_user.id)
         input_data = {"subreddit": "AutoGPT"}
         response = await server.agent_server.test_execute_graph(
-            test_graph.id, input_data, test_user.id
+            graph_id=test_graph.id,
+            user_id=test_user.id,
+            node_input=input_data,
         )
         print(response)
-        result = await wait_execution(test_user.id, test_graph.id, response["id"], 120)
+        result = await wait_execution(test_user.id, response.graph_exec_id, 120)
         print(result)
 
 
