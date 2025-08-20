@@ -3,7 +3,7 @@ import os
 import signal
 import sys
 from abc import ABC, abstractmethod
-from multiprocessing import Process, set_start_method
+from multiprocessing import Process, get_all_start_methods, set_start_method
 from typing import Optional
 
 from backend.util.logging import configure_logging
@@ -28,8 +28,14 @@ class AppProcess(ABC):
     """
 
     process: Optional[Process] = None
+    cleaned_up = False
 
-    set_start_method("spawn", force=True)
+    if "forkserver" in get_all_start_methods():
+        set_start_method("forkserver", force=True)
+    else:
+        logger.warning("Forkserver start method is not available. Using spawn instead.")
+        set_start_method("spawn", force=True)
+
     configure_logging()
     sentry_init()
 
@@ -47,6 +53,7 @@ class AppProcess(ABC):
     def service_name(cls) -> str:
         return cls.__name__
 
+    @abstractmethod
     def cleanup(self):
         """
         Implement this method on a subclass to do post-execution cleanup,
@@ -54,14 +61,9 @@ class AppProcess(ABC):
         """
         pass
 
-    def health_check(self):
-        """
-        A method to check the health of the process.
-        """
-        pass
-
     def execute_run_command(self, silent):
         signal.signal(signal.SIGTERM, self._self_terminate)
+        signal.signal(signal.SIGINT, self._self_terminate)
 
         try:
             if silent:
@@ -71,12 +73,30 @@ class AppProcess(ABC):
             set_service_name(self.service_name)
             logger.info(f"[{self.service_name}] Starting...")
             self.run()
-        except (KeyboardInterrupt, SystemExit) as e:
-            logger.warning(f"[{self.service_name}] Terminated: {e}; quitting...")
+        except BaseException as e:
+            logger.warning(
+                f"[{self.service_name}] Termination request: {type(e).__name__}; {e} executing cleanup."
+            )
+        finally:
+            self.cleanup()
+            logger.info(f"[{self.service_name}] Terminated.")
+
+    @staticmethod
+    def llprint(message: str):
+        """
+        Low-level print/log helper function for use in signal handlers.
+        Regular log/print statements are not allowed in signal handlers.
+        """
+        os.write(sys.stdout.fileno(), (message + "\n").encode())
 
     def _self_terminate(self, signum: int, frame):
-        self.cleanup()
-        sys.exit(0)
+        if not self.cleaned_up:
+            self.cleaned_up = True
+            sys.exit(0)
+        else:
+            self.llprint(
+                f"[{self.service_name}] Received exit signal {signum}, but cleanup is already underway."
+            )
 
     # Methods that are executed OUTSIDE the process #
 
@@ -108,7 +128,8 @@ class AppProcess(ABC):
             **proc_args,
         )
         self.process.start()
-        self.health_check()
+        logger.info(f"[{self.service_name}] started with PID {self.process.pid}")
+
         return self.process.pid or 0
 
     def stop(self):
@@ -120,4 +141,6 @@ class AppProcess(ABC):
 
         self.process.terminate()
         self.process.join()
+
+        logger.info(f"[{self.service_name}] with PID {self.process.pid} stopped")
         self.process = None
