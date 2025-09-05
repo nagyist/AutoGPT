@@ -1,12 +1,15 @@
 "use client";
 import React, {
+  createContext,
   useState,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   MouseEvent,
-  createContext,
+  Suspense,
 } from "react";
+import Link from "next/link";
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -21,17 +24,20 @@ import {
   useReactFlow,
   applyEdgeChanges,
   applyNodeChanges,
-  useViewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { CustomNode } from "./CustomNode";
 import "./flow.css";
-import { BlockUIType, Link } from "@/lib/autogpt-server-api";
 import {
-  getTypeColor,
-  filterBlocksByType,
-  findNewlyAddedBlockCoordinates,
-} from "@/lib/utils";
+  BlockUIType,
+  formatEdgeID,
+  GraphExecutionID,
+  GraphID,
+  LibraryAgent,
+} from "@/lib/autogpt-server-api";
+import { useBackendAPI } from "@/lib/autogpt-server-api/context";
+import { Key, storage } from "@/services/storage/local-storage";
+import { getTypeColor, findNewlyAddedBlockCoordinates } from "@/lib/utils";
 import { history } from "./history";
 import { CustomEdge } from "./CustomEdge";
 import ConnectionLine from "./ConnectionLine";
@@ -39,6 +45,7 @@ import { Control, ControlPanel } from "@/components/edit/control/ControlPanel";
 import { SaveControl } from "@/components/edit/control/SaveControl";
 import { BlocksControl } from "@/components/edit/control/BlocksControl";
 import { IconUndo2, IconRedo2 } from "@/components/ui/icons";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { startTutorial } from "./tutorial";
 import useAgentGraph from "@/hooks/useAgentGraph";
 import { v4 as uuidv4 } from "uuid";
@@ -47,9 +54,11 @@ import RunnerUIWrapper, {
   RunnerUIWrapperRef,
 } from "@/components/RunnerUIWrapper";
 import PrimaryActionBar from "@/components/PrimaryActionButton";
-import { useToast } from "@/components/ui/use-toast";
-import { forceLoad } from "@sentry/nextjs";
+import OttoChatWidget from "@/components/OttoChatWidget";
+import { useToast } from "@/components/molecules/Toast/use-toast";
 import { useCopyPaste } from "../hooks/useCopyPaste";
+import NewControlPanel from "@/app/(platform)/build/components/NewBlockMenu/NewControlPanel/NewControlPanel";
+import { Flag, useGetFlag } from "@/services/feature-flags/use-get-flag";
 
 // This is for the history, this is the minimum distance a block must move before it is logged
 // It helps to prevent spamming the history with small movements especially when pressing on a input in a block
@@ -73,42 +82,72 @@ export type NodeDimension = {
 export const FlowContext = createContext<FlowContextType | null>(null);
 
 const FlowEditor: React.FC<{
-  flowID?: string;
-  template?: boolean;
+  flowID?: GraphID;
+  flowVersion?: number;
   className?: string;
-}> = ({ flowID, template, className }) => {
+}> = ({ flowID, flowVersion, className }) => {
   const {
     addNodes,
     addEdges,
     getNode,
     deleteElements,
     updateNode,
+    getViewport,
     setViewport,
   } = useReactFlow<CustomNode, CustomEdge>();
   const [nodeId, setNodeId] = useState<number>(1);
-  const [copiedNodes, setCopiedNodes] = useState<CustomNode[]>([]);
-  const [copiedEdges, setCopiedEdges] = useState<CustomEdge[]>([]);
   const [isAnyModalOpen, setIsAnyModalOpen] = useState(false);
-  const [visualizeBeads, setVisualizeBeads] = useState<
-    "no" | "static" | "animate"
-  >("animate");
+  const [visualizeBeads] = useState<"no" | "static" | "animate">("animate");
+  const [flowExecutionID, setFlowExecutionID] = useState<
+    GraphExecutionID | undefined
+  >();
+  // State to control if blocks menu should be pinned open
+  const [pinBlocksPopover, setPinBlocksPopover] = useState(false);
+  // State to control if save popover should be pinned open
+  const [pinSavePopover, setPinSavePopover] = useState(false);
+
   const {
     agentName,
     setAgentName,
     agentDescription,
     setAgentDescription,
     savedAgent,
-    availableNodes,
+    availableBlocks,
+    availableFlows,
     getOutputType,
-    requestSave,
-    requestSaveAndRun,
-    requestStopRun,
+    saveAgent,
+    saveAndRun,
+    stopRun,
+    createRunSchedule,
+    isSaving,
     isRunning,
+    isStopping,
+    isScheduling,
+    graphExecutionError,
     nodes,
     setNodes,
     edges,
     setEdges,
-  } = useAgentGraph(flowID, template, visualizeBeads !== "no");
+  } = useAgentGraph(
+    flowID,
+    flowVersion,
+    flowExecutionID,
+    visualizeBeads !== "no",
+  );
+  const api = useBackendAPI();
+  const [libraryAgent, setLibraryAgent] = useState<LibraryAgent | null>(null);
+  useEffect(() => {
+    if (!flowID) return;
+    api
+      .getLibraryAgentByGraphID(flowID, flowVersion)
+      .then((libraryAgent) => setLibraryAgent(libraryAgent))
+      .catch((error) => {
+        console.warn(
+          `Failed to fetch LibraryAgent for graph #${flowID} v${flowVersion}`,
+          error,
+        );
+      });
+  }, [api, flowID, flowVersion]);
 
   const router = useRouter();
   const pathname = usePathname();
@@ -118,39 +157,50 @@ const FlowEditor: React.FC<{
   }>({});
   const isDragging = useRef(false);
 
-  // State to control if blocks menu should be pinned open
-  const [pinBlocksPopover, setPinBlocksPopover] = useState(false);
-  // State to control if save popover should be pinned open
-  const [pinSavePopover, setPinSavePopover] = useState(false);
-
   const runnerUIRef = useRef<RunnerUIWrapperRef>(null);
 
   const { toast } = useToast();
 
-  const TUTORIAL_STORAGE_KEY = "shepherd-tour";
-
   // It stores the dimension of all nodes with position as well
   const [nodeDimensions, setNodeDimensions] = useState<NodeDimension>({});
 
+  // Set page title with or without graph name
+  useEffect(() => {
+    document.title = savedAgent
+      ? `${savedAgent.name} - Builder - AutoGPT Platform`
+      : `Builder - AutoGPT Platform`;
+  }, [savedAgent]);
+
+  const graphHasWebhookNodes = useMemo(
+    () =>
+      nodes.some((n) =>
+        [BlockUIType.WEBHOOK, BlockUIType.WEBHOOK_MANUAL].includes(
+          n.data.uiType,
+        ),
+      ),
+    [nodes],
+  );
+
   useEffect(() => {
     if (params.get("resetTutorial") === "true") {
-      localStorage.removeItem(TUTORIAL_STORAGE_KEY);
+      storage.clean(Key.SHEPHERD_TOUR);
       router.push(pathname);
-    } else if (!localStorage.getItem(TUTORIAL_STORAGE_KEY)) {
+    } else if (!storage.get(Key.SHEPHERD_TOUR)) {
       const emptyNodes = (forceRemove: boolean = false) =>
         forceRemove ? (setNodes([]), setEdges([]), true) : nodes.length === 0;
       startTutorial(emptyNodes, setPinBlocksPopover, setPinSavePopover);
-      localStorage.setItem(TUTORIAL_STORAGE_KEY, "yes");
+      storage.set(Key.SHEPHERD_TOUR, "yes");
     }
-  }, [
-    availableNodes,
-    router,
-    pathname,
-    params,
-    setEdges,
-    setNodes,
-    nodes.length,
-  ]);
+  }, [router, pathname, params, setEdges, setNodes, nodes.length]);
+
+  useEffect(() => {
+    if (params.get("open_scheduling") === "true") {
+      runnerUIRef.current?.openRunInputDialog();
+    }
+    setFlowExecutionID(
+      (params.get("flowExecutionID") as GraphExecutionID) || undefined,
+    );
+  }, [params]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -163,12 +213,12 @@ const FlowEditor: React.FC<{
 
       if (isUndo) {
         event.preventDefault();
-        handleUndo();
+        history.undo();
       }
 
       if (isRedo) {
         event.preventDefault();
-        handleRedo();
+        history.redo();
       }
     };
 
@@ -214,18 +264,16 @@ const FlowEditor: React.FC<{
   // Function to clear status, output, and close the output info dropdown of all nodes
   // and reset data beads on edges
   const clearNodesStatusAndOutput = useCallback(() => {
-    setNodes((nds) => {
-      const newNodes = nds.map((node) => ({
+    setNodes((nds) =>
+      nds.map((node) => ({
         ...node,
         data: {
           ...node.data,
           status: undefined,
           isOutputOpen: false,
         },
-      }));
-
-      return newNodes;
-    });
+      })),
+    );
   }, [setNodes]);
 
   const onNodesChange = useCallback(
@@ -243,7 +291,7 @@ const FlowEditor: React.FC<{
           if (deletedNodeData) {
             history.push({
               type: "DELETE_NODE",
-              payload: { node: deletedNodeData },
+              payload: { node: deletedNodeData.data },
               undo: () => addNodes(deletedNodeData),
               redo: () => deleteElements({ nodes: [{ id: nodeID }] }),
             });
@@ -259,14 +307,6 @@ const FlowEditor: React.FC<{
     },
     [deleteElements, setNodes, nodes, edges, addNodes],
   );
-
-  const formatEdgeID = useCallback((conn: Link | Connection): string => {
-    if ("sink_id" in conn) {
-      return `${conn.source_id}_${conn.source_name}_${conn.sink_id}_${conn.sink_name}`;
-    } else {
-      return `${conn.source}_${conn.sourceHandle}_${conn.target}_${conn.targetHandle}`;
-    }
-  }, []);
 
   const onConnect: OnConnect = useCallback(
     (connection: Connection) => {
@@ -300,6 +340,8 @@ const FlowEditor: React.FC<{
           edgeColor,
           sourcePos: sourceNode!.position,
           isStatic: sourceNode!.data.isOutputStatic,
+          beadUp: 0,
+          beadDown: 0,
         },
         ...connection,
         source: connection.source!,
@@ -341,10 +383,7 @@ const FlowEditor: React.FC<{
         replaceEdges = edgeChanges.filter(
           (change) => change.type === "replace",
         ),
-        removedEdges = edgeChanges.filter((change) => change.type === "remove"),
-        selectedEdges = edgeChanges.filter(
-          (change) => change.type === "select",
-        );
+        removedEdges = edgeChanges.filter((change) => change.type === "remove");
 
       if (addedEdges.length > 0 || removedEdges.length > 0) {
         setNodes((nds) => {
@@ -414,11 +453,39 @@ const FlowEditor: React.FC<{
     return uuidv4();
   }, []);
 
-  const { x, y, zoom } = useViewport();
+  // Set the initial view port to center the canvas.
+  useEffect(() => {
+    const { x, y } = getViewport();
+    if (nodes.length <= 0 || x !== 0 || y !== 0) {
+      return;
+    }
+
+    const topLeft = { x: Infinity, y: Infinity };
+    const bottomRight = { x: -Infinity, y: -Infinity };
+
+    nodes.forEach((node) => {
+      const { x, y } = node.position;
+      topLeft.x = Math.min(topLeft.x, x);
+      topLeft.y = Math.min(topLeft.y, y);
+      // Rough estimate of the width and height of the node: 500x400.
+      bottomRight.x = Math.max(bottomRight.x, x + 500);
+      bottomRight.y = Math.max(bottomRight.y, y + 400);
+    });
+
+    const centerX = (topLeft.x + bottomRight.x) / 2;
+    const centerY = (topLeft.y + bottomRight.y) / 2;
+    const zoom = 0.8;
+
+    setViewport({
+      x: window.innerWidth / 2 - centerX * zoom,
+      y: window.innerHeight / 2 - centerY * zoom,
+      zoom: zoom,
+    });
+  }, [nodes, getViewport, setViewport]);
 
   const addNode = useCallback(
-    (blockId: string, nodeType: string) => {
-      const nodeSchema = availableNodes.find((node) => node.id === blockId);
+    (blockId: string, nodeType: string, hardcodedValues: any = {}) => {
+      const nodeSchema = availableBlocks.find((node) => node.id === blockId);
       if (!nodeSchema) {
         console.error(`Schema not found for block ID: ${blockId}`);
         return;
@@ -435,19 +502,20 @@ const FlowEditor: React.FC<{
 
       // Alternative: We could also use D3 force, Intersection for this (React flow Pro examples)
 
+      const { x, y } = getViewport();
       const viewportCoordinates =
         nodeDimensions && Object.keys(nodeDimensions).length > 0
           ? // we will get all the dimension of nodes, then store
             findNewlyAddedBlockCoordinates(
               nodeDimensions,
-              (nodeSchema.uiType == BlockUIType.NOTE ? 300 : 500) / zoom,
-              60 / zoom,
-              zoom,
+              nodeSchema.uiType == BlockUIType.NOTE ? 300 : 500,
+              60,
+              1.0,
             )
           : // we will get all the dimension of nodes, then store
             {
-              x: (window.innerWidth / 2 - x) / zoom,
-              y: (window.innerHeight / 2 - y) / zoom,
+              x: window.innerWidth / 2 - x,
+              y: window.innerHeight / 2 - y,
             };
 
       const newNode: CustomNode = {
@@ -462,7 +530,7 @@ const FlowEditor: React.FC<{
           categories: nodeSchema.categories,
           inputSchema: nodeSchema.inputSchema,
           outputSchema: nodeSchema.outputSchema,
-          hardcodedValues: {},
+          hardcodedValues: hardcodedValues,
           connections: [],
           isOutputOpen: false,
           block_id: blockId,
@@ -477,8 +545,10 @@ const FlowEditor: React.FC<{
 
       setViewport(
         {
-          x: -viewportCoordinates.x * zoom + window.innerWidth / 2,
-          y: -viewportCoordinates.y * zoom + window.innerHeight / 2 - 100,
+          // Rough estimate of the dimension of the node is: 500x400px.
+          // Though we skip shifting the X, considering the block menu side-bar.
+          x: -viewportCoordinates.x * 0.8 + (window.innerWidth - 0.0) / 2,
+          y: -viewportCoordinates.y * 0.8 + (window.innerHeight - 400) / 2,
           zoom: 0.8,
         },
         { duration: 500 },
@@ -493,15 +563,13 @@ const FlowEditor: React.FC<{
     },
     [
       nodeId,
+      getViewport,
       setViewport,
-      availableNodes,
+      availableBlocks,
       addNodes,
       nodeDimensions,
       deleteElements,
       clearNodesStatusAndOutput,
-      x,
-      y,
-      zoom,
     ],
   );
 
@@ -513,6 +581,8 @@ const FlowEditor: React.FC<{
       if (nodeElement) {
         const rect = nodeElement.getBoundingClientRect();
         const { left, top, width, height } = rect;
+
+        const { x, y, zoom } = getViewport();
 
         // Convert screen coordinates to flow coordinates
         const flowX = (left - x) / zoom;
@@ -531,19 +601,11 @@ const FlowEditor: React.FC<{
     }, {} as NodeDimension);
 
     setNodeDimensions(newNodeDimensions);
-  }, [nodes, x, y, zoom]);
+  }, [nodes, getViewport]);
 
   useEffect(() => {
     findNodeDimensions();
   }, [nodes, findNodeDimensions]);
-
-  const handleUndo = () => {
-    history.undo();
-  };
-
-  const handleRedo = () => {
-    history.redo();
-  };
 
   const handleCopyPaste = useCopyPaste(getNextNodeId);
 
@@ -574,18 +636,47 @@ const FlowEditor: React.FC<{
     clearNodesStatusAndOutput();
   }, [clearNodesStatusAndOutput]);
 
-  const editorControls: Control[] = [
-    {
-      label: "Undo",
-      icon: <IconUndo2 />,
-      onClick: handleUndo,
-    },
-    {
-      label: "Redo",
-      icon: <IconRedo2 />,
-      onClick: handleRedo,
-    },
-  ];
+  const editorControls: Control[] = useMemo(
+    () => [
+      {
+        label: "Undo",
+        icon: <IconUndo2 />,
+        onClick: history.undo,
+      },
+      {
+        label: "Redo",
+        icon: <IconRedo2 />,
+        onClick: history.redo,
+      },
+    ],
+    [],
+  );
+
+  const handleRunButton = useCallback(async () => {
+    if (isRunning) return;
+    if (!savedAgent) {
+      toast({
+        title: `Please save the agent first, using the button in the left sidebar.`,
+      });
+      return;
+    }
+    await saveAgent();
+    runnerUIRef.current?.runOrOpenInput();
+  }, [isRunning, savedAgent, toast, saveAgent]);
+
+  const handleScheduleButton = useCallback(async () => {
+    if (isScheduling) return;
+    if (!savedAgent) {
+      toast({
+        title: `Please save the agent first, using the button in the left sidebar.`,
+      });
+      return;
+    }
+    await saveAgent();
+    runnerUIRef.current?.openRunInputDialog();
+  }, [isScheduling, savedAgent, toast, saveAgent]);
+
+  const isNewBlockEnabled = useGetFlag(Flag.NEW_BLOCK_MENU);
 
   return (
     <FlowContext.Provider
@@ -605,63 +696,100 @@ const FlowEditor: React.FC<{
           onNodeDragStop={onNodeDragEnd}
           onNodeDragStart={onNodeDragStart}
           deleteKeyCode={["Backspace", "Delete"]}
-          minZoom={0.2}
+          minZoom={0.1}
           maxZoom={2}
+          className="dark:bg-slate-900"
         >
           <Controls />
-          <Background />
-          <ControlPanel
-            className="absolute z-10"
-            controls={editorControls}
-            topChildren={
-              <BlocksControl
-                pinBlocksPopover={pinBlocksPopover} // Pass the state to BlocksControl
-                blocks={availableNodes}
-                addBlock={addNode}
-              />
-            }
-            botChildren={
-              <SaveControl
-                agentMeta={savedAgent}
-                onSave={(isTemplate) => requestSave(isTemplate ?? false)}
-                agentDescription={agentDescription}
-                onDescriptionChange={setAgentDescription}
-                agentName={agentName}
-                onNameChange={setAgentName}
-                pinSavePopover={pinSavePopover}
-              />
-            }
-          ></ControlPanel>
-          <PrimaryActionBar
-            onClickAgentOutputs={() => runnerUIRef.current?.openRunnerOutput()}
-            onClickRunAgent={() => {
-              if (!savedAgent) {
-                toast({
-                  title: `Please save the agent using the button in the left sidebar before running it.`,
-                  duration: 2000,
-                });
-                return;
+          <Background className="dark:bg-slate-800" />
+          {isNewBlockEnabled ? (
+            <NewControlPanel
+              flowExecutionID={flowExecutionID}
+              visualizeBeads={visualizeBeads}
+              pinSavePopover={pinSavePopover}
+              pinBlocksPopover={pinBlocksPopover}
+            />
+          ) : (
+            <ControlPanel
+              className="absolute z-20"
+              controls={editorControls}
+              topChildren={
+                <BlocksControl
+                  pinBlocksPopover={pinBlocksPopover} // Pass the state to BlocksControl
+                  blocks={availableBlocks}
+                  addBlock={addNode}
+                  flows={availableFlows}
+                  nodes={nodes}
+                />
               }
-              if (!isRunning) {
-                runnerUIRef.current?.runOrOpenInput();
-              } else {
-                requestStopRun();
+              botChildren={
+                <SaveControl
+                  agentMeta={savedAgent}
+                  canSave={!isSaving && !isRunning && !isStopping}
+                  onSave={saveAgent}
+                  agentDescription={agentDescription}
+                  onDescriptionChange={setAgentDescription}
+                  agentName={agentName}
+                  onNameChange={setAgentName}
+                  pinSavePopover={pinSavePopover}
+                />
               }
-            }}
-            isDisabled={!savedAgent}
-            isRunning={isRunning}
-            requestStopRun={requestStopRun}
-            runAgentTooltip={!isRunning ? "Run Agent" : "Stop Agent"}
-          />
+            />
+          )}
+
+          {!graphHasWebhookNodes ? (
+            <PrimaryActionBar
+              className="absolute bottom-0 left-1/2 z-20 -translate-x-1/2"
+              onClickAgentOutputs={runnerUIRef.current?.openRunnerOutput}
+              onClickRunAgent={handleRunButton}
+              onClickStopRun={stopRun}
+              onClickScheduleButton={handleScheduleButton}
+              isDisabled={!savedAgent}
+              isRunning={isRunning}
+            />
+          ) : (
+            <Alert className="absolute bottom-4 left-1/2 z-20 w-auto -translate-x-1/2 select-none">
+              <AlertTitle>You are building a Trigger Agent</AlertTitle>
+              <AlertDescription>
+                Your agent{" "}
+                {savedAgent?.nodes.some((node) => node.webhook)
+                  ? "is listening"
+                  : "will listen"}{" "}
+                for its trigger and will run when the time is right.
+                <br />
+                You can view its activity in your
+                <Link
+                  href={
+                    libraryAgent
+                      ? `/library/agents/${libraryAgent.id}`
+                      : "/library"
+                  }
+                  className="underline"
+                >
+                  Agent Library
+                </Link>
+                .
+              </AlertDescription>
+            </Alert>
+          )}
         </ReactFlow>
       </div>
-      <RunnerUIWrapper
-        ref={runnerUIRef}
-        nodes={nodes}
-        setNodes={setNodes}
-        isRunning={isRunning}
-        requestSaveAndRun={requestSaveAndRun}
-      />
+      {savedAgent && (
+        <RunnerUIWrapper
+          ref={runnerUIRef}
+          graph={savedAgent}
+          nodes={nodes}
+          graphExecutionError={graphExecutionError}
+          createRunSchedule={createRunSchedule}
+          saveAndRun={saveAndRun}
+        />
+      )}
+      <Suspense fallback={null}>
+        <OttoChatWidget
+          graphID={flowID}
+          className="fixed bottom-4 right-4 z-20"
+        />
+      </Suspense>
     </FlowContext.Provider>
   );
 };

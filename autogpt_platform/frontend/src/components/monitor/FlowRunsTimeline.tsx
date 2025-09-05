@@ -1,4 +1,4 @@
-import { GraphMeta } from "@/lib/autogpt-server-api";
+import { GraphExecutionMeta, LibraryAgent } from "@/lib/autogpt-server-api";
 import {
   ComposedChart,
   DefaultLegendContentProps,
@@ -14,17 +14,16 @@ import moment from "moment/moment";
 import { Card } from "@/components/ui/card";
 import { cn, hashString } from "@/lib/utils";
 import React from "react";
-import { FlowRun } from "@/lib/types";
 import { FlowRunStatusBadge } from "@/components/monitor/FlowRunStatusBadge";
 
 export const FlowRunsTimeline = ({
   flows,
-  flowRuns,
+  executions,
   dataMin,
   className,
 }: {
-  flows: GraphMeta[];
-  flowRuns: FlowRun[];
+  flows: LibraryAgent[];
+  executions: GraphExecutionMeta[];
   dataMin: "dataMin" | number;
   className?: string;
 }) => (
@@ -59,32 +58,36 @@ export const FlowRunsTimeline = ({
         tickFormatter={(s) => (s > 90 ? `${Math.round(s / 60)}m` : `${s}s`)}
       />
       <Tooltip
-        content={({ payload, label }) => {
+        content={({ payload }) => {
           if (payload && payload.length) {
-            const data: FlowRun & { time: number; _duration: number } =
-              payload[0].payload;
-            const flow = flows.find((f) => f.id === data.graphID);
+            const data: GraphExecutionMeta & {
+              time: number;
+              _duration: number;
+            } = payload[0].payload;
+            const flow = flows.find((f) => f.graph_id === data.graph_id);
             return (
               <Card className="p-2 text-xs leading-normal">
                 <p>
                   <strong>Agent:</strong> {flow ? flow.name : "Unknown"}
                 </p>
-                <p>
+                <div>
                   <strong>Status:</strong>&nbsp;
                   <FlowRunStatusBadge
                     status={data.status}
                     className="px-1.5 py-0"
                   />
-                </p>
+                </div>
                 <p>
                   <strong>Started:</strong>{" "}
-                  {moment(data.startTime).format("YYYY-MM-DD HH:mm:ss")}
+                  {moment(data.started_at).format("YYYY-MM-DD HH:mm:ss")}
                 </p>
-                <p>
-                  <strong>Duration / run time:</strong>{" "}
-                  {formatDuration(data.duration)} /{" "}
-                  {formatDuration(data.totalRunTime)}
-                </p>
+                {data.stats && (
+                  <p>
+                    <strong>Duration / run time:</strong>{" "}
+                    {formatDuration(data.stats.duration)} /{" "}
+                    {formatDuration(data.stats.node_exec_time)}
+                  </p>
+                )}
               </Card>
             );
           }
@@ -94,27 +97,36 @@ export const FlowRunsTimeline = ({
       {flows.map((flow) => (
         <Scatter
           key={flow.id}
-          data={flowRuns
-            .filter((fr) => fr.graphID == flow.id)
-            .map((fr) => ({
-              ...fr,
-              time: fr.startTime + fr.totalRunTime * 1000,
-              _duration: fr.totalRunTime,
+          data={executions
+            .filter((e) => e.graph_id == flow.graph_id)
+            .map((e) => ({
+              ...e,
+              time:
+                e.started_at.getTime() + (e.stats?.node_exec_time ?? 0) * 1000,
+              _duration: e.stats?.node_exec_time ?? 0,
             }))}
           name={flow.name}
           fill={`hsl(${(hashString(flow.id) * 137.5) % 360}, 70%, 50%)`}
         />
       ))}
-      {flowRuns.map((run) => (
+      {executions.map((execution) => (
         <Line
-          key={run.id}
+          key={execution.id}
           type="linear"
           dataKey="_duration"
           data={[
-            { ...run, time: run.startTime, _duration: 0 },
-            { ...run, time: run.endTime, _duration: run.totalRunTime },
+            {
+              ...execution,
+              time: execution.started_at.getTime(),
+              _duration: 0,
+            },
+            {
+              ...execution,
+              time: execution.ended_at.getTime(),
+              _duration: execution.stats?.node_exec_time ?? 0,
+            },
           ]}
-          stroke={`hsl(${(hashString(run.graphID) * 137.5) % 360}, 70%, 50%)`}
+          stroke={`hsl(${(hashString(execution.graph_id) * 137.5) % 360}, 70%, 50%)`}
           strokeWidth={2}
           dot={false}
           legendType="none"
