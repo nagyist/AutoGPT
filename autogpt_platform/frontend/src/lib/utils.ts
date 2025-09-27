@@ -1,7 +1,9 @@
 import { type ClassValue, clsx } from "clsx";
+import { isEmpty as _isEmpty } from "lodash";
 import { twMerge } from "tailwind-merge";
-import { Category } from "./autogpt-server-api/types";
-import { NodeDimension } from "@/components/Flow";
+
+import { Category } from "@/lib/autogpt-server-api/types";
+import { NodeDimension } from "@/app/(platform)/build/components/legacy-builder/Flow/Flow";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -22,7 +24,7 @@ export function hashString(str: string): number {
 
 /** Derived from https://stackoverflow.com/a/32922084 */
 export function deepEquals(x: any, y: any): boolean {
-  const ok = Object.keys,
+  const ok = (obj: any) => Object.keys(obj).filter((key) => obj[key] !== null),
     tx = typeof x,
     ty = typeof y;
 
@@ -41,6 +43,7 @@ export function getTypeTextColor(type: string | null): string {
     {
       string: "text-green-500",
       number: "text-blue-500",
+      integer: "text-blue-500",
       boolean: "text-yellow-500",
       object: "text-purple-500",
       array: "text-indigo-500",
@@ -58,6 +61,7 @@ export function getTypeBgColor(type: string | null): string {
     {
       string: "border-green-500",
       number: "border-blue-500",
+      integer: "border-blue-500",
       boolean: "border-yellow-500",
       object: "border-purple-500",
       array: "border-indigo-500",
@@ -74,6 +78,7 @@ export function getTypeColor(type: string | null): string {
     {
       string: "#22c55e",
       number: "#3b82f6",
+      integer: "#3b82f6",
       boolean: "#eab308",
       object: "#a855f7",
       array: "#6366f1",
@@ -202,29 +207,25 @@ export function removeEmptyStringsAndNulls(obj: any): any {
 }
 
 export const categoryColorMap: Record<string, string> = {
-  AI: "bg-orange-300",
-  SOCIAL: "bg-yellow-300",
-  TEXT: "bg-green-300",
-  SEARCH: "bg-blue-300",
-  BASIC: "bg-purple-300",
-  INPUT: "bg-cyan-300",
-  OUTPUT: "bg-red-300",
-  LOGIC: "bg-teal-300",
-  DEVELOPER_TOOLS: "bg-fuchsia-300",
+  AI: "bg-orange-300 dark:bg-orange-700",
+  SOCIAL: "bg-yellow-300 dark:bg-yellow-700",
+  TEXT: "bg-green-300 dark:bg-green-700",
+  SEARCH: "bg-blue-300 dark:bg-blue-700",
+  BASIC: "bg-purple-300 dark:bg-purple-700",
+  INPUT: "bg-cyan-300 dark:bg-cyan-700",
+  OUTPUT: "bg-red-300 dark:bg-red-700",
+  LOGIC: "bg-teal-300 dark:bg-teal-700",
+  DEVELOPER_TOOLS: "bg-fuchsia-300 dark:bg-fuchsia-700",
+  AGENT: "bg-lime-300 dark:bg-lime-700",
 };
 
 export function getPrimaryCategoryColor(categories: Category[]): string {
   if (categories.length === 0) {
-    return "bg-gray-300";
+    return "bg-gray-300 dark:bg-slate-700";
   }
-  return categoryColorMap[categories[0].category] || "bg-gray-300";
-}
-
-export function filterBlocksByType<T>(
-  blocks: T[],
-  predicate: (block: T) => boolean,
-): T[] {
-  return blocks.filter(predicate);
+  return (
+    categoryColorMap[categories[0].category] || "bg-gray-300 dark:bg-slate-700"
+  );
 }
 
 export enum BehaveAs {
@@ -236,6 +237,25 @@ export function getBehaveAs(): BehaveAs {
   return process.env.NEXT_PUBLIC_BEHAVE_AS === "CLOUD"
     ? BehaveAs.CLOUD
     : BehaveAs.LOCAL;
+}
+
+export enum AppEnv {
+  LOCAL = "local",
+  DEV = "dev",
+  PROD = "prod",
+}
+
+export function getAppEnv(): AppEnv {
+  const env = process.env.NEXT_PUBLIC_APP_ENV;
+  if (env === "dev") return AppEnv.DEV;
+  if (env === "prod") return AppEnv.PROD;
+  // Some places use prod and others production
+  if (env === "production") return AppEnv.PROD;
+  return AppEnv.LOCAL;
+}
+
+export function getEnvironmentStr(): string {
+  return `app:${getAppEnv().toLowerCase()}-behave:${getBehaveAs().toLowerCase()}`;
 }
 
 function rectanglesOverlap(
@@ -311,4 +331,77 @@ export function findNewlyAddedBlockCoordinates(
     x: 0,
     y: 0,
   };
+}
+
+export function hasNonNullNonObjectValue(obj: any): boolean {
+  if (obj !== null && typeof obj === "object") {
+    return Object.values(obj).some((value) => hasNonNullNonObjectValue(value));
+  } else {
+    return obj !== null && typeof obj !== "object";
+  }
+}
+
+type ParsedKey = { key: string; index?: number };
+
+export function parseKeys(key: string): ParsedKey[] {
+  const splits = key.split(/_@_|_#_|_\$_|\./);
+  const keys: ParsedKey[] = [];
+  let currentKey: string | null = null;
+
+  splits.forEach((split) => {
+    const isInteger = /^\d+$/.test(split);
+    if (!isInteger) {
+      if (currentKey !== null) {
+        keys.push({ key: currentKey });
+      }
+      currentKey = split;
+    } else {
+      if (currentKey !== null) {
+        keys.push({ key: currentKey, index: parseInt(split, 10) });
+        currentKey = null;
+      } else {
+        throw new Error("Invalid key format: array index without a key");
+      }
+    }
+  });
+
+  if (currentKey !== null) {
+    keys.push({ key: currentKey });
+  }
+
+  return keys;
+}
+
+/**
+ * Get the value of a nested key in an object, handles arrays and objects.
+ */
+export function getValue(key: string, value: any) {
+  const keys = parseKeys(key);
+  return keys.reduce((acc, k) => {
+    if (acc === undefined) return undefined;
+    if (k.index !== undefined) {
+      return Array.isArray(acc[k.key]) ? acc[k.key][k.index] : undefined;
+    }
+    return acc[k.key];
+  }, value);
+}
+
+/** Check if a string is empty or whitespace */
+export function isEmptyOrWhitespace(str: string | undefined | null): boolean {
+  return !str || str.trim().length === 0;
+}
+
+export function isEmpty(value: any): boolean {
+  return (
+    value === undefined ||
+    value === "" ||
+    (typeof value === "object" &&
+      (value instanceof Date ? isNaN(value.getTime()) : _isEmpty(value))) ||
+    (typeof value === "number" && isNaN(value))
+  );
+}
+
+/** Check if a value is an object or not */
+export function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
