@@ -1,21 +1,29 @@
 from urllib.parse import parse_qs, urlparse
 
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import NoTranscriptFound
+from youtube_transcript_api._transcripts import FetchedTranscript
 from youtube_transcript_api.formatters import TextFormatter
 
-from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema
+from backend.data.block import (
+    Block,
+    BlockCategory,
+    BlockOutput,
+    BlockSchemaInput,
+    BlockSchemaOutput,
+)
 from backend.data.model import SchemaField
 
 
 class TranscribeYoutubeVideoBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         youtube_url: str = SchemaField(
             title="YouTube URL",
             description="The URL of the YouTube video to transcribe",
             placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         video_id: str = SchemaField(description="The extracted YouTube video ID")
         transcript: str = SchemaField(description="The transcribed text of the video")
         error: str = SchemaField(
@@ -42,6 +50,7 @@ class TranscribeYoutubeVideoBlock(Block):
                     {"text": "Never gonna give you up"},
                     {"text": "Never gonna let you down"},
                 ],
+                "format_transcript": lambda transcript: "Never gonna give you up\nNever gonna let you down",
             },
         )
 
@@ -61,15 +70,42 @@ class TranscribeYoutubeVideoBlock(Block):
         raise ValueError(f"Invalid YouTube URL: {url}")
 
     @staticmethod
-    def get_transcript(video_id: str):
-        return YouTubeTranscriptApi.get_transcript(video_id)
+    def get_transcript(video_id: str) -> FetchedTranscript:
+        """
+        Get transcript for a video, preferring English but falling back to any available language.
 
-    def run(self, input_data: Input, **kwargs) -> BlockOutput:
+        :param video_id: The YouTube video ID
+        :return: The fetched transcript
+        :raises: Any exception except NoTranscriptFound for requested languages
+        """
+        api = YouTubeTranscriptApi()
+        try:
+            # Try to get English transcript first (default behavior)
+            return api.fetch(video_id=video_id)
+        except NoTranscriptFound:
+            # If English is not available, get the first available transcript
+            transcript_list = api.list(video_id)
+            # Try manually created transcripts first, then generated ones
+            available_transcripts = list(
+                transcript_list._manually_created_transcripts.values()
+            ) + list(transcript_list._generated_transcripts.values())
+            if available_transcripts:
+                # Fetch the first available transcript
+                return available_transcripts[0].fetch()
+            # If no transcripts at all, re-raise the original error
+            raise
+
+    @staticmethod
+    def format_transcript(transcript: FetchedTranscript) -> str:
+        formatter = TextFormatter()
+        transcript_text = formatter.format_transcript(transcript)
+        return transcript_text
+
+    async def run(self, input_data: Input, **kwargs) -> BlockOutput:
         video_id = self.extract_video_id(input_data.youtube_url)
         yield "video_id", video_id
 
         transcript = self.get_transcript(video_id)
-        formatter = TextFormatter()
-        transcript_text = formatter.format_transcript(transcript)
+        transcript_text = self.format_transcript(transcript=transcript)
 
         yield "transcript", transcript_text
