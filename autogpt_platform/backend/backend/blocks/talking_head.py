@@ -1,12 +1,23 @@
-import time
+import asyncio
 from typing import Literal
 
-import requests
-from autogpt_libs.supabase_integration_credentials_store.types import APIKeyCredentials
 from pydantic import SecretStr
 
-from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema
-from backend.data.model import CredentialsField, CredentialsMetaInput, SchemaField
+from backend.data.block import (
+    Block,
+    BlockCategory,
+    BlockOutput,
+    BlockSchemaInput,
+    BlockSchemaOutput,
+)
+from backend.data.model import (
+    APIKeyCredentials,
+    CredentialsField,
+    CredentialsMetaInput,
+    SchemaField,
+)
+from backend.integrations.providers import ProviderName
+from backend.util.request import Requests
 
 TEST_CREDENTIALS = APIKeyCredentials(
     id="01234567-89ab-cdef-0123-456789abcdef",
@@ -24,14 +35,12 @@ TEST_CREDENTIALS_INPUT = {
 
 
 class CreateTalkingAvatarVideoBlock(Block):
-    class Input(BlockSchema):
-        credentials: CredentialsMetaInput[Literal["d_id"], Literal["api_key"]] = (
-            CredentialsField(
-                provider="d_id",
-                supported_credential_types={"api_key"},
-                description="The D-ID integration can be used with "
-                "any API key with sufficient permissions for the blocks it is used on.",
-            )
+    class Input(BlockSchemaInput):
+        credentials: CredentialsMetaInput[
+            Literal[ProviderName.D_ID], Literal["api_key"]
+        ] = CredentialsField(
+            description="The D-ID integration can be used with "
+            "any API key with sufficient permissions for the blocks it is used on.",
         )
         script_input: str = SchemaField(
             description="The text input for the script",
@@ -67,15 +76,14 @@ class CreateTalkingAvatarVideoBlock(Block):
             description="Interval between polling attempts in seconds", default=10, ge=5
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         video_url: str = SchemaField(description="The URL of the created video")
-        error: str = SchemaField(description="Error message if the request failed")
 
     def __init__(self):
         super().__init__(
             id="98c6f503-8c47-4b1c-a96d-351fc7c87dab",
             description="This block integrates with D-ID to create video clips and retrieve their URLs.",
-            categories={BlockCategory.AI},
+            categories={BlockCategory.AI, BlockCategory.MULTIMEDIA},
             input_schema=CreateTalkingAvatarVideoBlock.Input,
             output_schema=CreateTalkingAvatarVideoBlock.Output,
             test_input={
@@ -110,28 +118,26 @@ class CreateTalkingAvatarVideoBlock(Block):
             test_credentials=TEST_CREDENTIALS,
         )
 
-    def create_clip(self, api_key: SecretStr, payload: dict) -> dict:
+    async def create_clip(self, api_key: SecretStr, payload: dict) -> dict:
         url = "https://api.d-id.com/clips"
         headers = {
             "accept": "application/json",
             "content-type": "application/json",
             "authorization": f"Basic {api_key.get_secret_value()}",
         }
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
+        response = await Requests().post(url, json=payload, headers=headers)
         return response.json()
 
-    def get_clip_status(self, api_key: SecretStr, clip_id: str) -> dict:
+    async def get_clip_status(self, api_key: SecretStr, clip_id: str) -> dict:
         url = f"https://api.d-id.com/clips/{clip_id}"
         headers = {
             "accept": "application/json",
             "authorization": f"Basic {api_key.get_secret_value()}",
         }
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
+        response = await Requests().get(url, headers=headers)
         return response.json()
 
-    def run(
+    async def run(
         self, input_data: Input, *, credentials: APIKeyCredentials, **kwargs
     ) -> BlockOutput:
         # Create the clip
@@ -152,12 +158,12 @@ class CreateTalkingAvatarVideoBlock(Block):
             "driver_id": input_data.driver_id,
         }
 
-        response = self.create_clip(credentials.api_key, payload)
+        response = await self.create_clip(credentials.api_key, payload)
         clip_id = response["id"]
 
         # Poll for clip status
         for _ in range(input_data.max_polling_attempts):
-            status_response = self.get_clip_status(credentials.api_key, clip_id)
+            status_response = await self.get_clip_status(credentials.api_key, clip_id)
             if status_response["status"] == "done":
                 yield "video_url", status_response["result_url"]
                 return
@@ -166,6 +172,6 @@ class CreateTalkingAvatarVideoBlock(Block):
                     f"Clip creation failed: {status_response.get('error', 'Unknown error')}"
                 )
 
-            time.sleep(input_data.polling_interval)
+            await asyncio.sleep(input_data.polling_interval)
 
         raise TimeoutError("Clip creation timed out")
