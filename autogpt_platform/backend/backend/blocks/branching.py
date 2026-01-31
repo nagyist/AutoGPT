@@ -1,8 +1,15 @@
 from enum import Enum
 from typing import Any
 
-from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema
+from backend.data.block import (
+    Block,
+    BlockCategory,
+    BlockOutput,
+    BlockSchemaInput,
+    BlockSchemaOutput,
+)
 from backend.data.model import SchemaField
+from backend.util.type import convert
 
 
 class ComparisonOperator(Enum):
@@ -15,7 +22,7 @@ class ComparisonOperator(Enum):
 
 
 class ConditionBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         value1: Any = SchemaField(
             description="Enter the first value for comparison",
             placeholder="For example: 10 or 'hello' or True",
@@ -39,7 +46,7 @@ class ConditionBlock(Block):
             default=None,
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         result: bool = SchemaField(
             description="The result of the condition evaluation (True or False)"
         )
@@ -70,12 +77,25 @@ class ConditionBlock(Block):
             ],
         )
 
-    def run(self, input_data: Input, **kwargs) -> BlockOutput:
-        value1 = input_data.value1
+    async def run(self, input_data: Input, **kwargs) -> BlockOutput:
         operator = input_data.operator
+
+        value1 = input_data.value1
+        if isinstance(value1, str):
+            try:
+                value1 = float(value1.strip())
+            except ValueError:
+                value1 = value1.strip()
+
         value2 = input_data.value2
+        if isinstance(value2, str):
+            try:
+                value2 = float(value2.strip())
+            except ValueError:
+                value2 = value2.strip()
+
         yes_value = input_data.yes_value if input_data.yes_value is not None else value1
-        no_value = input_data.no_value if input_data.no_value is not None else value1
+        no_value = input_data.no_value if input_data.no_value is not None else value2
 
         comparison_funcs = {
             ComparisonOperator.EQUAL: lambda a, b: a == b,
@@ -88,15 +108,108 @@ class ConditionBlock(Block):
 
         try:
             result = comparison_funcs[operator](value1, value2)
+        except Exception as e:
+            raise ValueError(f"Comparison failed: {e}") from e
 
-            yield "result", result
+        yield "result", result
 
-            if result:
-                yield "yes_output", yes_value
-            else:
-                yield "no_output", no_value
+        if result:
+            yield "yes_output", yes_value
+        else:
+            yield "no_output", no_value
 
-        except Exception:
-            yield "result", None
-            yield "yes_output", None
-            yield "no_output", None
+
+class IfInputMatchesBlock(Block):
+    class Input(BlockSchemaInput):
+        input: Any = SchemaField(
+            description="The input to match against",
+            placeholder="For example: 10 or 'hello' or True",
+        )
+        value: Any = SchemaField(
+            description="The value to output if the input matches",
+            placeholder="For example: 'Greater' or 20 or False",
+        )
+        yes_value: Any = SchemaField(
+            description="The value to output if the input matches",
+            placeholder="For example: 'Greater' or 20 or False",
+            default=None,
+        )
+        no_value: Any = SchemaField(
+            description="The value to output if the input does not match",
+            placeholder="For example: 'Greater' or 20 or False",
+            default=None,
+        )
+
+    class Output(BlockSchemaOutput):
+        result: bool = SchemaField(
+            description="The result of the condition evaluation (True or False)"
+        )
+        yes_output: Any = SchemaField(
+            description="The output value if the condition is true"
+        )
+        no_output: Any = SchemaField(
+            description="The output value if the condition is false"
+        )
+
+    def __init__(self):
+        super().__init__(
+            id="6dbbc4b3-ca6c-42b6-b508-da52d23e13f2",
+            input_schema=IfInputMatchesBlock.Input,
+            output_schema=IfInputMatchesBlock.Output,
+            description="Handles conditional logic based on comparison operators",
+            categories={BlockCategory.LOGIC},
+            test_input=[
+                {
+                    "input": 10,
+                    "value": 10,
+                    "yes_value": "Greater",
+                    "no_value": "Not greater",
+                },
+                {
+                    "input": 10,
+                    "value": 20,
+                    "yes_value": "Greater",
+                    "no_value": "Not greater",
+                },
+                {
+                    "input": 10,
+                    "value": "None",
+                    "yes_value": "Yes",
+                    "no_value": "No",
+                },
+            ],
+            test_output=[
+                ("result", True),
+                ("yes_output", "Greater"),
+                ("result", False),
+                ("no_output", "Not greater"),
+                ("result", False),
+                ("no_output", "No"),
+                # ("result", True),
+                # ("yes_output", "Yes"),
+            ],
+        )
+
+    async def run(self, input_data: Input, **kwargs) -> BlockOutput:
+
+        # If input_data.value is not matching input_data.input, convert value to type of input
+        if (
+            input_data.input != input_data.value
+            and input_data.input is not input_data.value
+        ):
+            try:
+                # Only attempt conversion if input is not None and value is not None
+                if input_data.input is not None and input_data.value is not None:
+                    input_type = type(input_data.input)
+                    # Avoid converting if input_type is Any or object
+                    if input_type not in (Any, object):
+                        input_data.value = convert(input_data.value, input_type)
+            except Exception:
+                pass  # If conversion fails, just leave value as is
+
+        if input_data.input == input_data.value:
+            yield "result", True
+            yield "yes_output", input_data.yes_value
+        else:
+            yield "result", False
+            yield "no_output", input_data.no_value
