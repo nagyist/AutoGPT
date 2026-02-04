@@ -1,11 +1,17 @@
 import base64
 
-import requests
 from typing_extensions import TypedDict
 
-from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema
+from backend.data.block import (
+    Block,
+    BlockCategory,
+    BlockOutput,
+    BlockSchemaInput,
+    BlockSchemaOutput,
+)
 from backend.data.model import SchemaField
 
+from ._api import get_api
 from ._auth import (
     TEST_CREDENTIALS,
     TEST_CREDENTIALS_INPUT,
@@ -16,14 +22,14 @@ from ._auth import (
 
 
 class GithubListTagsBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
             placeholder="https://github.com/owner/repo",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         class TagItem(TypedDict):
             name: str
             url: str
@@ -31,7 +37,9 @@ class GithubListTagsBlock(Block):
         tag: TagItem = SchemaField(
             title="Tag", description="Tags with their name and file tree browser URL"
         )
-        error: str = SchemaField(description="Error message if listing tags failed")
+        tags: list[TagItem] = SchemaField(
+            description="List of tags with their name and file tree browser URL"
+        )
 
     def __init__(self):
         super().__init__(
@@ -47,12 +55,21 @@ class GithubListTagsBlock(Block):
             test_credentials=TEST_CREDENTIALS,
             test_output=[
                 (
+                    "tags",
+                    [
+                        {
+                            "name": "v1.0.0",
+                            "url": "https://github.com/owner/repo/tree/v1.0.0",
+                        }
+                    ],
+                ),
+                (
                     "tag",
                     {
                         "name": "v1.0.0",
                         "url": "https://github.com/owner/repo/tree/v1.0.0",
                     },
-                )
+                ),
             ],
             test_mock={
                 "list_tags": lambda *args, **kwargs: [
@@ -65,20 +82,14 @@ class GithubListTagsBlock(Block):
         )
 
     @staticmethod
-    def list_tags(
+    async def list_tags(
         credentials: GithubCredentials, repo_url: str
     ) -> list[Output.TagItem]:
-        repo_path = repo_url.replace("https://github.com/", "")
-        api_url = f"https://api.github.com/repos/{repo_path}/tags"
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
+        api = get_api(credentials)
+        tags_url = repo_url + "/tags"
+        response = await api.get(tags_url)
         data = response.json()
+        repo_path = repo_url.replace("https://github.com/", "")
         tags: list[GithubListTagsBlock.Output.TagItem] = [
             {
                 "name": tag["name"],
@@ -86,32 +97,33 @@ class GithubListTagsBlock(Block):
             }
             for tag in data
         ]
-
         return tags
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        tags = self.list_tags(
+        tags = await self.list_tags(
             credentials,
             input_data.repo_url,
         )
-        yield from (("tag", tag) for tag in tags)
+        yield "tags", tags
+        for tag in tags:
+            yield "tag", tag
 
 
 class GithubListBranchesBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
             placeholder="https://github.com/owner/repo",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         class BranchItem(TypedDict):
             name: str
             url: str
@@ -120,7 +132,9 @@ class GithubListBranchesBlock(Block):
             title="Branch",
             description="Branches with their name and file tree browser URL",
         )
-        error: str = SchemaField(description="Error message if listing branches failed")
+        branches: list[BranchItem] = SchemaField(
+            description="List of branches with their name and file tree browser URL"
+        )
 
     def __init__(self):
         super().__init__(
@@ -136,12 +150,21 @@ class GithubListBranchesBlock(Block):
             test_credentials=TEST_CREDENTIALS,
             test_output=[
                 (
+                    "branches",
+                    [
+                        {
+                            "name": "main",
+                            "url": "https://github.com/owner/repo/tree/main",
+                        }
+                    ],
+                ),
+                (
                     "branch",
                     {
                         "name": "main",
                         "url": "https://github.com/owner/repo/tree/main",
                     },
-                )
+                ),
             ],
             test_mock={
                 "list_branches": lambda *args, **kwargs: [
@@ -154,41 +177,41 @@ class GithubListBranchesBlock(Block):
         )
 
     @staticmethod
-    def list_branches(
+    async def list_branches(
         credentials: GithubCredentials, repo_url: str
     ) -> list[Output.BranchItem]:
-        api_url = repo_url.replace("github.com", "api.github.com/repos") + "/branches"
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
+        api = get_api(credentials)
+        branches_url = repo_url + "/branches"
+        response = await api.get(branches_url)
         data = response.json()
+        repo_path = repo_url.replace("https://github.com/", "")
         branches: list[GithubListBranchesBlock.Output.BranchItem] = [
-            {"name": branch["name"], "url": branch["commit"]["url"]} for branch in data
+            {
+                "name": branch["name"],
+                "url": f"https://github.com/{repo_path}/tree/{branch['name']}",
+            }
+            for branch in data
         ]
-
         return branches
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        branches = self.list_branches(
+        branches = await self.list_branches(
             credentials,
             input_data.repo_url,
         )
-        yield from (("branch", branch) for branch in branches)
+        yield "branches", branches
+        for branch in branches:
+            yield "branch", branch
 
 
 class GithubListDiscussionsBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
@@ -198,13 +221,16 @@ class GithubListDiscussionsBlock(Block):
             description="Number of discussions to fetch", default=5
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         class DiscussionItem(TypedDict):
             title: str
             url: str
 
         discussion: DiscussionItem = SchemaField(
             title="Discussion", description="Discussions with their title and URL"
+        )
+        discussions: list[DiscussionItem] = SchemaField(
+            description="List of discussions with their title and URL"
         )
         error: str = SchemaField(
             description="Error message if listing discussions failed"
@@ -225,12 +251,21 @@ class GithubListDiscussionsBlock(Block):
             test_credentials=TEST_CREDENTIALS,
             test_output=[
                 (
+                    "discussions",
+                    [
+                        {
+                            "title": "Discussion 1",
+                            "url": "https://github.com/owner/repo/discussions/1",
+                        }
+                    ],
+                ),
+                (
                     "discussion",
                     {
                         "title": "Discussion 1",
                         "url": "https://github.com/owner/repo/discussions/1",
                     },
-                )
+                ),
             ],
             test_mock={
                 "list_discussions": lambda *args, **kwargs: [
@@ -243,9 +278,11 @@ class GithubListDiscussionsBlock(Block):
         )
 
     @staticmethod
-    def list_discussions(
+    async def list_discussions(
         credentials: GithubCredentials, repo_url: str, num_discussions: int
     ) -> list[Output.DiscussionItem]:
+        api = get_api(credentials)
+        # GitHub GraphQL API endpoint is different; we'll use api.post with custom URL
         repo_path = repo_url.replace("https://github.com/", "")
         owner, repo = repo_path.split("/")
         query = """
@@ -261,48 +298,43 @@ class GithubListDiscussionsBlock(Block):
         }
         """
         variables = {"owner": owner, "repo": repo, "num": num_discussions}
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.post(
+        response = await api.post(
             "https://api.github.com/graphql",
             json={"query": query, "variables": variables},
-            headers=headers,
         )
-        response.raise_for_status()
-
         data = response.json()
         discussions: list[GithubListDiscussionsBlock.Output.DiscussionItem] = [
             {"title": discussion["title"], "url": discussion["url"]}
             for discussion in data["data"]["repository"]["discussions"]["nodes"]
         ]
-
         return discussions
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        discussions = self.list_discussions(
-            credentials, input_data.repo_url, input_data.num_discussions
+        discussions = await self.list_discussions(
+            credentials,
+            input_data.repo_url,
+            input_data.num_discussions,
         )
-        yield from (("discussion", discussion) for discussion in discussions)
+        yield "discussions", discussions
+        for discussion in discussions:
+            yield "discussion", discussion
 
 
 class GithubListReleasesBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
             placeholder="https://github.com/owner/repo",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         class ReleaseItem(TypedDict):
             name: str
             url: str
@@ -311,7 +343,9 @@ class GithubListReleasesBlock(Block):
             title="Release",
             description="Releases with their name and file tree browser URL",
         )
-        error: str = SchemaField(description="Error message if listing releases failed")
+        releases: list[ReleaseItem] = SchemaField(
+            description="List of releases with their name and file tree browser URL"
+        )
 
     def __init__(self):
         super().__init__(
@@ -327,12 +361,21 @@ class GithubListReleasesBlock(Block):
             test_credentials=TEST_CREDENTIALS,
             test_output=[
                 (
+                    "releases",
+                    [
+                        {
+                            "name": "v1.0.0",
+                            "url": "https://github.com/owner/repo/releases/tag/v1.0.0",
+                        }
+                    ],
+                ),
+                (
                     "release",
                     {
                         "name": "v1.0.0",
                         "url": "https://github.com/owner/repo/releases/tag/v1.0.0",
                     },
-                )
+                ),
             ],
             test_mock={
                 "list_releases": lambda *args, **kwargs: [
@@ -345,42 +388,36 @@ class GithubListReleasesBlock(Block):
         )
 
     @staticmethod
-    def list_releases(
+    async def list_releases(
         credentials: GithubCredentials, repo_url: str
     ) -> list[Output.ReleaseItem]:
-        repo_path = repo_url.replace("https://github.com/", "")
-        api_url = f"https://api.github.com/repos/{repo_path}/releases"
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
+        api = get_api(credentials)
+        releases_url = repo_url + "/releases"
+        response = await api.get(releases_url)
         data = response.json()
         releases: list[GithubListReleasesBlock.Output.ReleaseItem] = [
             {"name": release["name"], "url": release["html_url"]} for release in data
         ]
-
         return releases
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        releases = self.list_releases(
+        releases = await self.list_releases(
             credentials,
             input_data.repo_url,
         )
-        yield from (("release", release) for release in releases)
+        yield "releases", releases
+        for release in releases:
+            yield "release", release
 
 
 class GithubReadFileBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
@@ -396,7 +433,7 @@ class GithubReadFileBlock(Block):
             default="master",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         text_content: str = SchemaField(
             description="Content of the file (decoded as UTF-8 text)"
         )
@@ -404,7 +441,6 @@ class GithubReadFileBlock(Block):
             description="Raw base64-encoded content of the file"
         )
         size: int = SchemaField(description="The size of the file (in bytes)")
-        error: str = SchemaField(description="Error message if the file reading failed")
 
     def __init__(self):
         super().__init__(
@@ -429,52 +465,45 @@ class GithubReadFileBlock(Block):
         )
 
     @staticmethod
-    def read_file(
+    async def read_file(
         credentials: GithubCredentials, repo_url: str, file_path: str, branch: str
     ) -> tuple[str, int]:
-        repo_path = repo_url.replace("https://github.com/", "")
-        api_url = f"https://api.github.com/repos/{repo_path}/contents/{file_path}?ref={branch}"
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
+        api = get_api(credentials)
+        content_url = repo_url + f"/contents/{file_path}?ref={branch}"
+        response = await api.get(content_url)
+        data = response.json()
 
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
-        content = response.json()
-
-        if isinstance(content, list):
+        if isinstance(data, list):
             # Multiple entries of different types exist at this path
-            if not (file := next((f for f in content if f["type"] == "file"), None)):
+            if not (file := next((f for f in data if f["type"] == "file"), None)):
                 raise TypeError("Not a file")
-            content = file
+            data = file
 
-        if content["type"] != "file":
+        if data["type"] != "file":
             raise TypeError("Not a file")
 
-        return content["content"], content["size"]
+        return data["content"], data["size"]
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        raw_content, size = self.read_file(
+        content, size = await self.read_file(
             credentials,
             input_data.repo_url,
-            input_data.file_path.lstrip("/"),
+            input_data.file_path,
             input_data.branch,
         )
-        yield "raw_content", raw_content
-        yield "text_content", base64.b64decode(raw_content).decode("utf-8")
+        yield "raw_content", content
+        yield "text_content", base64.b64decode(content).decode("utf-8")
         yield "size", size
 
 
 class GithubReadFolderBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
@@ -490,7 +519,7 @@ class GithubReadFolderBlock(Block):
             default="master",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         class DirEntry(TypedDict):
             name: str
             path: str
@@ -546,69 +575,59 @@ class GithubReadFolderBlock(Block):
         )
 
     @staticmethod
-    def read_folder(
+    async def read_folder(
         credentials: GithubCredentials, repo_url: str, folder_path: str, branch: str
     ) -> tuple[list[Output.FileEntry], list[Output.DirEntry]]:
-        repo_path = repo_url.replace("https://github.com/", "")
-        api_url = f"https://api.github.com/repos/{repo_path}/contents/{folder_path}?ref={branch}"
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
+        api = get_api(credentials)
+        contents_url = repo_url + f"/contents/{folder_path}?ref={branch}"
+        response = await api.get(contents_url)
+        data = response.json()
 
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
-        content = response.json()
-
-        if isinstance(content, list):
-            # Multiple entries of different types exist at this path
-            if not (dir := next((d for d in content if d["type"] == "dir"), None)):
-                raise TypeError("Not a folder")
-            content = dir
-
-        if content["type"] != "dir":
+        if not isinstance(data, list):
             raise TypeError("Not a folder")
 
-        return (
-            [
-                GithubReadFolderBlock.Output.FileEntry(
-                    name=entry["name"],
-                    path=entry["path"],
-                    size=entry["size"],
-                )
-                for entry in content["entries"]
-                if entry["type"] == "file"
-            ],
-            [
-                GithubReadFolderBlock.Output.DirEntry(
-                    name=entry["name"],
-                    path=entry["path"],
-                )
-                for entry in content["entries"]
-                if entry["type"] == "dir"
-            ],
-        )
+        files: list[GithubReadFolderBlock.Output.FileEntry] = [
+            GithubReadFolderBlock.Output.FileEntry(
+                name=entry["name"],
+                path=entry["path"],
+                size=entry["size"],
+            )
+            for entry in data
+            if entry["type"] == "file"
+        ]
 
-    def run(
+        dirs: list[GithubReadFolderBlock.Output.DirEntry] = [
+            GithubReadFolderBlock.Output.DirEntry(
+                name=entry["name"],
+                path=entry["path"],
+            )
+            for entry in data
+            if entry["type"] == "dir"
+        ]
+
+        return files, dirs
+
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        files, dirs = self.read_folder(
+        files, dirs = await self.read_folder(
             credentials,
             input_data.repo_url,
             input_data.folder_path.lstrip("/"),
             input_data.branch,
         )
-        yield from (("file", file) for file in files)
-        yield from (("dir", dir) for dir in dirs)
+        for file in files:
+            yield "file", file
+        for dir in dirs:
+            yield "dir", dir
 
 
 class GithubMakeBranchBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
@@ -623,7 +642,7 @@ class GithubMakeBranchBlock(Block):
             placeholder="source_branch_name",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         status: str = SchemaField(description="Status of the branch creation operation")
         error: str = SchemaField(
             description="Error message if the branch creation failed"
@@ -650,42 +669,35 @@ class GithubMakeBranchBlock(Block):
         )
 
     @staticmethod
-    def create_branch(
+    async def create_branch(
         credentials: GithubCredentials,
         repo_url: str,
         new_branch: str,
         source_branch: str,
     ) -> str:
-        repo_path = repo_url.replace("https://github.com/", "")
-        ref_api_url = (
-            f"https://api.github.com/repos/{repo_path}/git/refs/heads/{source_branch}"
-        )
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
+        api = get_api(credentials)
+        ref_url = repo_url + f"/git/refs/heads/{source_branch}"
+        response = await api.get(ref_url)
+        data = response.json()
+        sha = data["object"]["sha"]
+
+        # Create the new branch
+        new_ref_url = repo_url + "/git/refs"
+        data = {
+            "ref": f"refs/heads/{new_branch}",
+            "sha": sha,
         }
-
-        response = requests.get(ref_api_url, headers=headers)
-        response.raise_for_status()
-
-        sha = response.json()["object"]["sha"]
-
-        create_branch_api_url = f"https://api.github.com/repos/{repo_path}/git/refs"
-        data = {"ref": f"refs/heads/{new_branch}", "sha": sha}
-
-        response = requests.post(create_branch_api_url, headers=headers, json=data)
-        response.raise_for_status()
-
+        response = await api.post(new_ref_url, json=data)
         return "Branch created successfully"
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        status = self.create_branch(
+        status = await self.create_branch(
             credentials,
             input_data.repo_url,
             input_data.new_branch,
@@ -695,7 +707,7 @@ class GithubMakeBranchBlock(Block):
 
 
 class GithubDeleteBranchBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
@@ -706,7 +718,7 @@ class GithubDeleteBranchBlock(Block):
             placeholder="branch_name",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         status: str = SchemaField(description="Status of the branch deletion operation")
         error: str = SchemaField(
             description="Error message if the branch deletion failed"
@@ -732,31 +744,431 @@ class GithubDeleteBranchBlock(Block):
         )
 
     @staticmethod
-    def delete_branch(
+    async def delete_branch(
         credentials: GithubCredentials, repo_url: str, branch: str
     ) -> str:
-        repo_path = repo_url.replace("https://github.com/", "")
-        api_url = f"https://api.github.com/repos/{repo_path}/git/refs/heads/{branch}"
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.delete(api_url, headers=headers)
-        response.raise_for_status()
-
+        api = get_api(credentials)
+        ref_url = repo_url + f"/git/refs/heads/{branch}"
+        await api.delete(ref_url)
         return "Branch deleted successfully"
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        status = self.delete_branch(
+        status = await self.delete_branch(
             credentials,
             input_data.repo_url,
             input_data.branch,
         )
         yield "status", status
+
+
+class GithubCreateFileBlock(Block):
+    class Input(BlockSchemaInput):
+        credentials: GithubCredentialsInput = GithubCredentialsField("repo")
+        repo_url: str = SchemaField(
+            description="URL of the GitHub repository",
+            placeholder="https://github.com/owner/repo",
+        )
+        file_path: str = SchemaField(
+            description="Path where the file should be created",
+            placeholder="path/to/file.txt",
+        )
+        content: str = SchemaField(
+            description="Content to write to the file",
+            placeholder="File content here",
+        )
+        branch: str = SchemaField(
+            description="Branch where the file should be created",
+            default="main",
+        )
+        commit_message: str = SchemaField(
+            description="Message for the commit",
+            default="Create new file",
+        )
+
+    class Output(BlockSchemaOutput):
+        url: str = SchemaField(description="URL of the created file")
+        sha: str = SchemaField(description="SHA of the commit")
+        error: str = SchemaField(
+            description="Error message if the file creation failed"
+        )
+
+    def __init__(self):
+        super().__init__(
+            id="8fd132ac-b917-428a-8159-d62893e8a3fe",
+            description="This block creates a new file in a GitHub repository.",
+            categories={BlockCategory.DEVELOPER_TOOLS},
+            input_schema=GithubCreateFileBlock.Input,
+            output_schema=GithubCreateFileBlock.Output,
+            test_input={
+                "repo_url": "https://github.com/owner/repo",
+                "file_path": "test/file.txt",
+                "content": "Test content",
+                "branch": "main",
+                "commit_message": "Create test file",
+                "credentials": TEST_CREDENTIALS_INPUT,
+            },
+            test_credentials=TEST_CREDENTIALS,
+            test_output=[
+                ("url", "https://github.com/owner/repo/blob/main/test/file.txt"),
+                ("sha", "abc123"),
+            ],
+            test_mock={
+                "create_file": lambda *args, **kwargs: (
+                    "https://github.com/owner/repo/blob/main/test/file.txt",
+                    "abc123",
+                )
+            },
+        )
+
+    @staticmethod
+    async def create_file(
+        credentials: GithubCredentials,
+        repo_url: str,
+        file_path: str,
+        content: str,
+        branch: str,
+        commit_message: str,
+    ) -> tuple[str, str]:
+        api = get_api(credentials)
+        contents_url = repo_url + f"/contents/{file_path}"
+        content_base64 = base64.b64encode(content.encode()).decode()
+        data = {
+            "message": commit_message,
+            "content": content_base64,
+            "branch": branch,
+        }
+        response = await api.put(contents_url, json=data)
+        data = response.json()
+        return data["content"]["html_url"], data["commit"]["sha"]
+
+    async def run(
+        self,
+        input_data: Input,
+        *,
+        credentials: GithubCredentials,
+        **kwargs,
+    ) -> BlockOutput:
+        try:
+            url, sha = await self.create_file(
+                credentials,
+                input_data.repo_url,
+                input_data.file_path,
+                input_data.content,
+                input_data.branch,
+                input_data.commit_message,
+            )
+            yield "url", url
+            yield "sha", sha
+        except Exception as e:
+            yield "error", str(e)
+
+
+class GithubUpdateFileBlock(Block):
+    class Input(BlockSchemaInput):
+        credentials: GithubCredentialsInput = GithubCredentialsField("repo")
+        repo_url: str = SchemaField(
+            description="URL of the GitHub repository",
+            placeholder="https://github.com/owner/repo",
+        )
+        file_path: str = SchemaField(
+            description="Path to the file to update",
+            placeholder="path/to/file.txt",
+        )
+        content: str = SchemaField(
+            description="New content for the file",
+            placeholder="Updated content here",
+        )
+        branch: str = SchemaField(
+            description="Branch containing the file",
+            default="main",
+        )
+        commit_message: str = SchemaField(
+            description="Message for the commit",
+            default="Update file",
+        )
+
+    class Output(BlockSchemaOutput):
+        url: str = SchemaField(description="URL of the updated file")
+        sha: str = SchemaField(description="SHA of the commit")
+
+    def __init__(self):
+        super().__init__(
+            id="30be12a4-57cb-4aa4-baf5-fcc68d136076",
+            description="This block updates an existing file in a GitHub repository.",
+            categories={BlockCategory.DEVELOPER_TOOLS},
+            input_schema=GithubUpdateFileBlock.Input,
+            output_schema=GithubUpdateFileBlock.Output,
+            test_input={
+                "repo_url": "https://github.com/owner/repo",
+                "file_path": "test/file.txt",
+                "content": "Updated content",
+                "branch": "main",
+                "commit_message": "Update test file",
+                "credentials": TEST_CREDENTIALS_INPUT,
+            },
+            test_credentials=TEST_CREDENTIALS,
+            test_output=[
+                ("url", "https://github.com/owner/repo/blob/main/test/file.txt"),
+                ("sha", "def456"),
+            ],
+            test_mock={
+                "update_file": lambda *args, **kwargs: (
+                    "https://github.com/owner/repo/blob/main/test/file.txt",
+                    "def456",
+                )
+            },
+        )
+
+    @staticmethod
+    async def update_file(
+        credentials: GithubCredentials,
+        repo_url: str,
+        file_path: str,
+        content: str,
+        branch: str,
+        commit_message: str,
+    ) -> tuple[str, str]:
+        api = get_api(credentials)
+        contents_url = repo_url + f"/contents/{file_path}"
+        params = {"ref": branch}
+        response = await api.get(contents_url, params=params)
+        data = response.json()
+
+        # Convert new content to base64
+        content_base64 = base64.b64encode(content.encode()).decode()
+        data = {
+            "message": commit_message,
+            "content": content_base64,
+            "sha": data["sha"],
+            "branch": branch,
+        }
+        response = await api.put(contents_url, json=data)
+        data = response.json()
+        return data["content"]["html_url"], data["commit"]["sha"]
+
+    async def run(
+        self,
+        input_data: Input,
+        *,
+        credentials: GithubCredentials,
+        **kwargs,
+    ) -> BlockOutput:
+        try:
+            url, sha = await self.update_file(
+                credentials,
+                input_data.repo_url,
+                input_data.file_path,
+                input_data.content,
+                input_data.branch,
+                input_data.commit_message,
+            )
+            yield "url", url
+            yield "sha", sha
+        except Exception as e:
+            yield "error", str(e)
+
+
+class GithubCreateRepositoryBlock(Block):
+    class Input(BlockSchemaInput):
+        credentials: GithubCredentialsInput = GithubCredentialsField("repo")
+        name: str = SchemaField(
+            description="Name of the repository to create",
+            placeholder="my-new-repo",
+        )
+        description: str = SchemaField(
+            description="Description of the repository",
+            placeholder="A description of the repository",
+            default="",
+        )
+        private: bool = SchemaField(
+            description="Whether the repository should be private",
+            default=False,
+        )
+        auto_init: bool = SchemaField(
+            description="Whether to initialize the repository with a README",
+            default=True,
+        )
+        gitignore_template: str = SchemaField(
+            description="Git ignore template to use (e.g., Python, Node, Java)",
+            default="",
+        )
+
+    class Output(BlockSchemaOutput):
+        url: str = SchemaField(description="URL of the created repository")
+        clone_url: str = SchemaField(description="Git clone URL of the repository")
+        error: str = SchemaField(
+            description="Error message if the repository creation failed"
+        )
+
+    def __init__(self):
+        super().__init__(
+            id="029ec3b8-1cfd-46d3-b6aa-28e4a706efd1",
+            description="This block creates a new GitHub repository.",
+            categories={BlockCategory.DEVELOPER_TOOLS},
+            input_schema=GithubCreateRepositoryBlock.Input,
+            output_schema=GithubCreateRepositoryBlock.Output,
+            test_input={
+                "name": "test-repo",
+                "description": "A test repository",
+                "private": False,
+                "auto_init": True,
+                "gitignore_template": "Python",
+                "credentials": TEST_CREDENTIALS_INPUT,
+            },
+            test_credentials=TEST_CREDENTIALS,
+            test_output=[
+                ("url", "https://github.com/owner/test-repo"),
+                ("clone_url", "https://github.com/owner/test-repo.git"),
+            ],
+            test_mock={
+                "create_repository": lambda *args, **kwargs: (
+                    "https://github.com/owner/test-repo",
+                    "https://github.com/owner/test-repo.git",
+                )
+            },
+        )
+
+    @staticmethod
+    async def create_repository(
+        credentials: GithubCredentials,
+        name: str,
+        description: str,
+        private: bool,
+        auto_init: bool,
+        gitignore_template: str,
+    ) -> tuple[str, str]:
+        api = get_api(credentials)
+        data = {
+            "name": name,
+            "description": description,
+            "private": private,
+            "auto_init": auto_init,
+            "gitignore_template": gitignore_template,
+        }
+        response = await api.post("https://api.github.com/user/repos", json=data)
+        data = response.json()
+        return data["html_url"], data["clone_url"]
+
+    async def run(
+        self,
+        input_data: Input,
+        *,
+        credentials: GithubCredentials,
+        **kwargs,
+    ) -> BlockOutput:
+        try:
+            url, clone_url = await self.create_repository(
+                credentials,
+                input_data.name,
+                input_data.description,
+                input_data.private,
+                input_data.auto_init,
+                input_data.gitignore_template,
+            )
+            yield "url", url
+            yield "clone_url", clone_url
+        except Exception as e:
+            yield "error", str(e)
+
+
+class GithubListStargazersBlock(Block):
+    class Input(BlockSchemaInput):
+        credentials: GithubCredentialsInput = GithubCredentialsField("repo")
+        repo_url: str = SchemaField(
+            description="URL of the GitHub repository",
+            placeholder="https://github.com/owner/repo",
+        )
+
+    class Output(BlockSchemaOutput):
+        class StargazerItem(TypedDict):
+            username: str
+            url: str
+
+        stargazer: StargazerItem = SchemaField(
+            title="Stargazer",
+            description="Stargazers with their username and profile URL",
+        )
+        stargazers: list[StargazerItem] = SchemaField(
+            description="List of stargazers with their username and profile URL"
+        )
+        error: str = SchemaField(
+            description="Error message if listing stargazers failed"
+        )
+
+    def __init__(self):
+        super().__init__(
+            id="a4b9c2d1-e5f6-4g7h-8i9j-0k1l2m3n4o5p",  # Generated unique UUID
+            description="This block lists all users who have starred a specified GitHub repository.",
+            categories={BlockCategory.DEVELOPER_TOOLS},
+            input_schema=GithubListStargazersBlock.Input,
+            output_schema=GithubListStargazersBlock.Output,
+            test_input={
+                "repo_url": "https://github.com/owner/repo",
+                "credentials": TEST_CREDENTIALS_INPUT,
+            },
+            test_credentials=TEST_CREDENTIALS,
+            test_output=[
+                (
+                    "stargazers",
+                    [
+                        {
+                            "username": "octocat",
+                            "url": "https://github.com/octocat",
+                        }
+                    ],
+                ),
+                (
+                    "stargazer",
+                    {
+                        "username": "octocat",
+                        "url": "https://github.com/octocat",
+                    },
+                ),
+            ],
+            test_mock={
+                "list_stargazers": lambda *args, **kwargs: [
+                    {
+                        "username": "octocat",
+                        "url": "https://github.com/octocat",
+                    }
+                ]
+            },
+        )
+
+    @staticmethod
+    async def list_stargazers(
+        credentials: GithubCredentials, repo_url: str
+    ) -> list[Output.StargazerItem]:
+        api = get_api(credentials)
+        stargazers_url = repo_url + "/stargazers"
+        response = await api.get(stargazers_url)
+        data = response.json()
+        stargazers: list[GithubListStargazersBlock.Output.StargazerItem] = [
+            {
+                "username": stargazer["login"],
+                "url": stargazer["html_url"],
+            }
+            for stargazer in data
+        ]
+        return stargazers
+
+    async def run(
+        self,
+        input_data: Input,
+        *,
+        credentials: GithubCredentials,
+        **kwargs,
+    ) -> BlockOutput:
+        stargazers = await self.list_stargazers(
+            credentials,
+            input_data.repo_url,
+        )
+        yield "stargazers", stargazers
+        for stargazer in stargazers:
+            yield "stargazer", stargazer

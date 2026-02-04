@@ -1,11 +1,22 @@
 from typing import Any, Literal
 
-import requests
-from autogpt_libs.supabase_integration_credentials_store.types import APIKeyCredentials
 from pydantic import SecretStr
 
-from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema
-from backend.data.model import CredentialsField, CredentialsMetaInput, SchemaField
+from backend.data.block import (
+    Block,
+    BlockCategory,
+    BlockOutput,
+    BlockSchemaInput,
+    BlockSchemaOutput,
+)
+from backend.data.model import (
+    APIKeyCredentials,
+    CredentialsField,
+    CredentialsMetaInput,
+    SchemaField,
+)
+from backend.integrations.providers import ProviderName
+from backend.util.request import Requests
 
 TEST_CREDENTIALS = APIKeyCredentials(
     id="01234567-89ab-cdef-0123-456789abcdef",
@@ -23,7 +34,7 @@ TEST_CREDENTIALS_INPUT = {
 
 
 class UnrealTextToSpeechBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         text: str = SchemaField(
             description="The text to be converted to speech",
             placeholder="Enter the text you want to convert to speech",
@@ -34,23 +45,20 @@ class UnrealTextToSpeechBlock(Block):
             default="Scarlett",
         )
         credentials: CredentialsMetaInput[
-            Literal["unreal_speech"], Literal["api_key"]
+            Literal[ProviderName.UNREAL_SPEECH], Literal["api_key"]
         ] = CredentialsField(
-            provider="unreal_speech",
-            supported_credential_types={"api_key"},
             description="The Unreal Speech integration can be used with "
             "any API key with sufficient permissions for the blocks it is used on.",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         mp3_url: str = SchemaField(description="The URL of the generated MP3 file")
-        error: str = SchemaField(description="Error message if the API call failed")
 
     def __init__(self):
         super().__init__(
             id="4ff1ff6d-cc40-4caa-ae69-011daa20c378",
             description="Converts text to speech using the Unreal Speech API",
-            categories={BlockCategory.AI, BlockCategory.TEXT},
+            categories={BlockCategory.AI, BlockCategory.TEXT, BlockCategory.MULTIMEDIA},
             input_schema=UnrealTextToSpeechBlock.Input,
             output_schema=UnrealTextToSpeechBlock.Output,
             test_input={
@@ -68,7 +76,7 @@ class UnrealTextToSpeechBlock(Block):
         )
 
     @staticmethod
-    def call_unreal_speech_api(
+    async def call_unreal_speech_api(
         api_key: SecretStr, text: str, voice_id: str
     ) -> dict[str, Any]:
         url = "https://api.v7.unrealspeech.com/speech"
@@ -85,14 +93,13 @@ class UnrealTextToSpeechBlock(Block):
             "TimestampType": "sentence",
         }
 
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
+        response = await Requests().post(url, headers=headers, json=data)
         return response.json()
 
-    def run(
+    async def run(
         self, input_data: Input, *, credentials: APIKeyCredentials, **kwargs
     ) -> BlockOutput:
-        api_response = self.call_unreal_speech_api(
+        api_response = await self.call_unreal_speech_api(
             credentials.api_key,
             input_data.text,
             input_data.voice_id,
