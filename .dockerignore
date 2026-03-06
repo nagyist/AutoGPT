@@ -1,40 +1,72 @@
 # Ignore everything by default, selectively add things to context
-classic/run
+*
 
-# AutoGPT
+# Documentation (for embeddings/search)
+!docs/
+
+# Platform - Libs
+!autogpt_platform/autogpt_libs/
+
+# Platform - Backend
+!autogpt_platform/backend/
+
+# Platform - Frontend
+!autogpt_platform/frontend/
+
+# Classic - AutoGPT
 !classic/original_autogpt/autogpt/
 !classic/original_autogpt/pyproject.toml
 !classic/original_autogpt/poetry.lock
 !classic/original_autogpt/README.md
 !classic/original_autogpt/tests/
 
-# Benchmark
+# Classic - Benchmark
 !classic/benchmark/agbenchmark/
 !classic/benchmark/pyproject.toml
 !classic/benchmark/poetry.lock
 !classic/benchmark/README.md
 
-# Forge
+# Classic - Forge
 !classic/forge/
 !classic/forge/pyproject.toml
 !classic/forge/poetry.lock
 !classic/forge/README.md
 
-# Frontend
+# Classic - Frontend
 !classic/frontend/build/web/
 
-# Platform
-!autogpt_platform/
+# Explicitly re-ignore unwanted files from whitelisted directories
+# Note: These patterns MUST come after the whitelist rules to take effect
 
-# Explicitly re-ignore some folders
-.*
-**/__pycache__
+# Hidden files and directories (but keep frontend .env files needed for build)
+**/.*
+!autogpt_platform/frontend/.env
+!autogpt_platform/frontend/.env.default
+!autogpt_platform/frontend/.env.production
 
-autogpt_platform/frontend/.next/
-autogpt_platform/frontend/node_modules
-autogpt_platform/frontend/.env.example
-autogpt_platform/frontend/.env.local
-autogpt_platform/backend/.env
-autogpt_platform/backend/.venv/
+# Python artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.venv/
+**/.ruff_cache/
+**/.pytest_cache/
+**/.coverage
+**/htmlcov/
 
-autogpt_platform/market/.env
+# Node artifacts
+**/node_modules/
+**/.next/
+**/storybook-static/
+**/playwright-report/
+**/test-results/
+
+# Build artifacts
+**/dist/
+**/build/
+!autogpt_platform/frontend/src/**/build/
+**/target/
+
+# Logs and temp files
+**/*.log
+**/*.tmp
