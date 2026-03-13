@@ -1,62 +1,73 @@
+import { environment } from "@/services/environment";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { getCookieSettings, isAdminPage, isProtectedPage } from "./helpers";
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
   });
 
-  const isAvailable = Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-  );
+  const supabaseUrl = environment.getSupabaseUrl();
+  const supabaseKey = environment.getSupabaseAnonKey();
+  const isAvailable = Boolean(supabaseUrl && supabaseKey);
 
   if (!isAvailable) {
     return supabaseResponse;
   }
 
   try {
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() {
-            return request.cookies.getAll();
-          },
-          setAll(cookiesToSet) {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              request.cookies.set(name, value),
-            );
-            supabaseResponse = NextResponse.next({
-              request,
+    const supabase = createServerClient(supabaseUrl, supabaseKey, {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value }) =>
+            request.cookies.set(name, value),
+          );
+          supabaseResponse = NextResponse.next({
+            request,
+          });
+          cookiesToSet.forEach(({ name, value, options }) => {
+            supabaseResponse.cookies.set(name, value, {
+              ...options,
+              ...getCookieSettings(),
             });
-            cookiesToSet.forEach(({ name, value, options }) =>
-              supabaseResponse.cookies.set(name, value, options),
-            );
-          },
+          });
         },
       },
-    );
+    });
+
+    const userResponse = await supabase.auth.getUser();
+    const user = userResponse.data.user;
+    const userRole = user?.role;
+
+    const url = request.nextUrl.clone();
+    const pathname = request.nextUrl.pathname;
 
     // IMPORTANT: Avoid writing any logic between createServerClient and
     // supabase.auth.getUser(). A simple mistake could make it very hard to debug
     // issues with users being randomly logged out.
 
-    const {
-      data: { user },
-      error,
-    } = await supabase.auth.getUser();
+    // AUTH REDIRECTS
+    // 1. Check if user is not authenticated but trying to access protected content
+    if (!user) {
+      const attemptingProtectedPage = isProtectedPage(pathname);
+      const attemptingAdminPage = isAdminPage(pathname);
 
-    if (
-      !user &&
-      !request.nextUrl.pathname.startsWith("/login") &&
-      !request.nextUrl.pathname.startsWith("/auth")
-    ) {
-      // no user, potentially respond by redirecting the user to the login page
-      const url = request.nextUrl.clone();
-      url.pathname = "/login";
-      // return NextResponse.redirect(url)
+      if (attemptingProtectedPage || attemptingAdminPage) {
+        const currentDest = url.pathname + url.search;
+        url.pathname = "/login";
+        url.search = `?next=${encodeURIComponent(currentDest)}`;
+        return NextResponse.redirect(url);
+      }
+    }
+
+    // 2. Check if user is authenticated but lacks admin role when accessing admin pages
+    if (user && userRole !== "admin" && isAdminPage(pathname)) {
+      url.pathname = "/";
+      return NextResponse.redirect(url);
     }
 
     // IMPORTANT: You *must* return the supabaseResponse object as it is. If you're
