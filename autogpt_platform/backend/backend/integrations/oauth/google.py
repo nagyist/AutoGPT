@@ -1,6 +1,6 @@
 import logging
+from typing import Optional
 
-from autogpt_libs.supabase_integration_credentials_store import OAuth2Credentials
 from google.auth.external_account_authorized_user import (
     Credentials as ExternalAccountCredentials,
 )
@@ -8,6 +8,10 @@ from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from pydantic import SecretStr
+
+from backend.data.model import OAuth2Credentials
+from backend.integrations.providers import ProviderName
+from backend.util.request import Requests
 
 from .base import BaseOAuthHandler
 
@@ -20,7 +24,7 @@ class GoogleOAuthHandler(BaseOAuthHandler):
     Based on the documentation at https://developers.google.com/identity/protocols/oauth2/web-server
     """  # noqa
 
-    PROVIDER_NAME = "google"
+    PROVIDER_NAME = ProviderName.GOOGLE
     EMAIL_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo"
     DEFAULT_SCOPES = [
         "https://www.googleapis.com/auth/userinfo.email",
@@ -36,7 +40,9 @@ class GoogleOAuthHandler(BaseOAuthHandler):
         self.token_uri = "https://oauth2.googleapis.com/token"
         self.revoke_uri = "https://oauth2.googleapis.com/revoke"
 
-    def get_login_url(self, scopes: list[str], state: str) -> str:
+    def get_login_url(
+        self, scopes: list[str], state: str, code_challenge: Optional[str]
+    ) -> str:
         all_scopes = list(set(scopes + self.DEFAULT_SCOPES))
         logger.debug(f"Setting up OAuth flow with scopes: {all_scopes}")
         flow = self._setup_oauth_flow(all_scopes)
@@ -49,8 +55,8 @@ class GoogleOAuthHandler(BaseOAuthHandler):
         )
         return authorization_url
 
-    def exchange_code_for_tokens(
-        self, code: str, scopes: list[str]
+    async def exchange_code_for_tokens(
+        self, code: str, scopes: list[str], code_verifier: Optional[str]
     ) -> OAuth2Credentials:
         logger.debug(f"Exchanging code for tokens with scopes: {scopes}")
 
@@ -71,7 +77,7 @@ class GoogleOAuthHandler(BaseOAuthHandler):
         logger.debug(f"Scopes granted by Google: {granted_scopes}")
 
         google_creds = flow.credentials
-        logger.debug(f"Received credentials: {google_creds}")
+        logger.debug("Received credentials")
 
         logger.debug("Requesting user email")
         username = self._request_email(google_creds)
@@ -101,15 +107,34 @@ class GoogleOAuthHandler(BaseOAuthHandler):
 
         return credentials
 
-    def revoke_tokens(self, credentials: OAuth2Credentials) -> bool:
-        session = AuthorizedSession(credentials)
-        response = session.post(
+    async def revoke_tokens(self, credentials: OAuth2Credentials) -> bool:
+        # Google's revoke endpoint only needs the token in the request body;
+        # it does not need an Authorization header. Previously this used
+        # google-auth's AuthorizedSession, which calls .before_request() on
+        # the credential object — that fails with AttributeError when given
+        # our Pydantic OAuth2Credentials (which isn't a google-auth
+        # Credentials). Switching to the platform's async Requests helper
+        # matches how the other providers (reddit/github/...) do it.
+        if not credentials.access_token:
+            return False
+
+        # raise_for_status=False so a 400 (already-revoked token, malformed
+        # body, rate limit, etc.) flows back as response.ok=False instead of
+        # raising — the caller uses the bool to set the UI `revoked` flag
+        # and does not need to distinguish failure modes.
+        # retry_max_attempts bounds tenacity retries on 429/5xx — without
+        # it `Requests` retries indefinitely with exponential backoff up
+        # to 5 minutes per wait, and a transient Google failure would
+        # hang the credential deletion API call forever.
+        response = await Requests(
+            raise_for_status=False,
+            retry_max_attempts=3,
+        ).post(
             self.revoke_uri,
-            params={"token": credentials.access_token.get_secret_value()},
-            headers={"content-type": "application/x-www-form-urlencoded"},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={"token": credentials.access_token.get_secret_value()},
         )
-        response.raise_for_status()
-        return True
+        return response.ok
 
     def _request_email(
         self, creds: Credentials | ExternalAccountCredentials
@@ -123,7 +148,9 @@ class GoogleOAuthHandler(BaseOAuthHandler):
             return None
         return response.json()["email"]
 
-    def _refresh_tokens(self, credentials: OAuth2Credentials) -> OAuth2Credentials:
+    async def _refresh_tokens(
+        self, credentials: OAuth2Credentials
+    ) -> OAuth2Credentials:
         # Google credentials should ALWAYS have a refresh token
         assert credentials.refresh_token
 
