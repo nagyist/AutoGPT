@@ -1,20 +1,74 @@
 import logging
-from contextlib import contextmanager
+import os
+from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
-from autogpt_libs.supabase_integration_credentials_store import (
-    Credentials,
-    SupabaseIntegrationCredentialsStore,
+from autogpt_libs.utils.synchronize import AsyncRedisKeyedMutex
+from redis.asyncio.lock import Lock as AsyncRedisLock
+
+from backend.data.model import Credentials, OAuth2Credentials
+from backend.integrations.credentials_store import (
+    IntegrationCredentialsStore,
+    provider_matches,
 )
-from autogpt_libs.utils.synchronize import RedisKeyedMutex
-from redis.lock import Lock as RedisLock
-
-from backend.data import redis
-from backend.integrations.oauth import HANDLERS_BY_NAME, BaseOAuthHandler
+from backend.integrations.oauth import CREDENTIALS_BY_PROVIDER, HANDLERS_BY_NAME
+from backend.integrations.providers import ProviderName
+from backend.util.exceptions import MissingConfigError
 from backend.util.settings import Settings
+
+if TYPE_CHECKING:
+    from backend.integrations.oauth import BaseOAuthHandler
 
 logger = logging.getLogger(__name__)
 settings = Settings()
+
+
+_on_creds_changed: Callable[[str, str], None] | None = None
+
+
+def register_creds_changed_hook(hook: Callable[[str, str], None]) -> None:
+    """Register a callback invoked after any credential is created/updated/deleted.
+
+    The callback receives ``(user_id, provider)`` and should be idempotent.
+    Only one hook can be registered at a time.  Intended to be called once at
+    application startup (e.g. by the copilot module) without creating an
+    import cycle.
+
+    Raises:
+        RuntimeError: If a hook is already registered.  Call
+            :func:`unregister_creds_changed_hook` first if replacement is needed.
+    """
+    global _on_creds_changed
+    if _on_creds_changed is not None:
+        raise RuntimeError(
+            "A creds_changed hook is already registered. "
+            "Call unregister_creds_changed_hook() before registering a new one."
+        )
+    _on_creds_changed = hook
+
+
+def unregister_creds_changed_hook() -> None:
+    """Remove the currently registered creds-changed hook (if any).
+
+    Primarily useful in tests to reset global state between test cases.
+    """
+    global _on_creds_changed
+    _on_creds_changed = None
+
+
+def _invoke_creds_changed_hook(user_id: str, provider: str) -> None:
+    """Invoke the registered creds-changed hook (if any)."""
+    if _on_creds_changed is not None:
+        try:
+            _on_creds_changed(user_id, provider)
+        except Exception:
+            logger.warning(
+                "Credential-change hook failed for user=%s provider=%s",
+                user_id,
+                provider,
+                exc_info=True,
+            )
 
 
 class IntegrationCredentialsManager:
@@ -50,20 +104,28 @@ class IntegrationCredentialsManager:
     """
 
     def __init__(self):
-        redis_conn = redis.get_redis()
-        self._locks = RedisKeyedMutex(redis_conn)
-        self.store = SupabaseIntegrationCredentialsStore(redis=redis_conn)
+        self.store = IntegrationCredentialsStore()
 
-    def create(self, user_id: str, credentials: Credentials) -> None:
-        return self.store.add_creds(user_id, credentials)
+    async def locks(self) -> AsyncRedisKeyedMutex:
+        # Delegate to store's @thread_cached locks.  Manager uses these for
+        # fine-grained per-credential locking (refresh, acquire); the store
+        # uses its own for coarse per-user integrations locking.  Same mutex
+        # type, different key spaces — no collision.
+        return await self.store.locks()
 
-    def exists(self, user_id: str, credentials_id: str) -> bool:
-        return self.store.get_creds_by_id(user_id, credentials_id) is not None
+    async def create(self, user_id: str, credentials: Credentials) -> None:
+        result = await self.store.add_creds(user_id, credentials)
+        # Notify listeners so downstream caches are invalidated immediately.
+        _invoke_creds_changed_hook(user_id, credentials.provider)
+        return result
 
-    def get(
+    async def exists(self, user_id: str, credentials_id: str) -> bool:
+        return (await self.store.get_creds_by_id(user_id, credentials_id)) is not None
+
+    async def get(
         self, user_id: str, credentials_id: str, lock: bool = True
     ) -> Credentials | None:
-        credentials = self.store.get_creds_by_id(user_id, credentials_id)
+        credentials = await self.store.get_creds_by_id(user_id, credentials_id)
         if not credentials:
             return None
 
@@ -74,33 +136,15 @@ class IntegrationCredentialsManager:
                 f"{datetime.fromtimestamp(credentials.access_token_expires_at)}; "
                 f"current time is {datetime.now()}"
             )
-
-            with self._locked(user_id, credentials_id, "refresh"):
-                oauth_handler = _get_provider_oauth_handler(credentials.provider)
-                if oauth_handler.needs_refresh(credentials):
-                    logger.debug(
-                        f"Refreshing '{credentials.provider}' "
-                        f"credentials #{credentials.id}"
-                    )
-                    _lock = None
-                    if lock:
-                        # Wait until the credentials are no longer in use anywhere
-                        _lock = self._acquire_lock(user_id, credentials_id)
-
-                    fresh_credentials = oauth_handler.refresh_tokens(credentials)
-                    self.store.update_creds(user_id, fresh_credentials)
-                    if _lock:
-                        _lock.release()
-
-                    credentials = fresh_credentials
+            credentials = await self.refresh_if_needed(user_id, credentials, lock)
         else:
             logger.debug(f"Credentials #{credentials.id} never expire")
 
         return credentials
 
-    def acquire(
+    async def acquire(
         self, user_id: str, credentials_id: str
-    ) -> tuple[Credentials, RedisLock]:
+    ) -> tuple[Credentials, AsyncRedisLock]:
         """
         ⚠️ WARNING: this locks credentials system-wide and blocks both acquiring
         and updating them elsewhere until the lock is released.
@@ -108,63 +152,221 @@ class IntegrationCredentialsManager:
         """
         # Use a low-priority (!time_sensitive) locking queue on top of the general lock
         # to allow priority access for refreshing/updating the tokens.
-        with self._locked(user_id, credentials_id, "!time_sensitive"):
-            lock = self._acquire_lock(user_id, credentials_id)
-        credentials = self.get(user_id, credentials_id, lock=False)
+        async with self._locked(user_id, credentials_id, "!time_sensitive"):
+            lock = await self._acquire_lock(user_id, credentials_id)
+        credentials = await self.get(user_id, credentials_id, lock=False)
         if not credentials:
             raise ValueError(
                 f"Credentials #{credentials_id} for user #{user_id} not found"
             )
         return credentials, lock
 
-    def update(self, user_id: str, updated: Credentials) -> None:
-        with self._locked(user_id, updated.id):
-            self.store.update_creds(user_id, updated)
+    def cached_getter(
+        self, user_id: str
+    ) -> Callable[[str], "Coroutine[Any, Any, Credentials | None]"]:
+        all_credentials = None
 
-    def delete(self, user_id: str, credentials_id: str) -> None:
-        with self._locked(user_id, credentials_id):
-            self.store.delete_creds_by_id(user_id, credentials_id)
+        async def get_credentials(creds_id: str) -> "Credentials | None":
+            nonlocal all_credentials
+            if not all_credentials:
+                # Fetch credentials on first necessity
+                all_credentials = await self.store.get_all_creds(user_id)
+
+            credential = next((c for c in all_credentials if c.id == creds_id), None)
+            if not credential:
+                return None
+            if credential.type != "oauth2" or not credential.access_token_expires_at:
+                # Credential doesn't expire
+                return credential
+
+            # Credential is OAuth2 credential and has expiration timestamp
+            return await self.refresh_if_needed(user_id, credential)
+
+        return get_credentials
+
+    async def refresh_if_needed(
+        self, user_id: str, credentials: OAuth2Credentials, lock: bool = True
+    ) -> OAuth2Credentials:
+        # When lock=False, skip ALL Redis locking (both the outer "refresh" scope
+        # lock and the inner credential lock).  This is used by the copilot's
+        # integration_creds module which runs across multiple threads with separate
+        # event loops; acquiring a Redis lock whose asyncio.Lock() was created on
+        # a different loop raises "Future attached to a different loop".
+        if lock:
+            return await self._refresh_locked(user_id, credentials)
+        return await self._refresh_unlocked(user_id, credentials)
+
+    async def _get_oauth_handler(
+        self, credentials: OAuth2Credentials
+    ) -> "BaseOAuthHandler":
+        """Resolve the appropriate OAuth handler for the given credentials."""
+        if provider_matches(credentials.provider, ProviderName.MCP.value):
+            return create_mcp_oauth_handler(credentials)
+        return await _get_provider_oauth_handler(credentials.provider)
+
+    async def _refresh_locked(
+        self, user_id: str, credentials: OAuth2Credentials
+    ) -> OAuth2Credentials:
+        async with self._locked(user_id, credentials.id, "refresh"):
+            oauth_handler = await self._get_oauth_handler(credentials)
+            if oauth_handler.needs_refresh(credentials):
+                logger.debug(
+                    "Refreshing '%s' credentials #%s",
+                    credentials.provider,
+                    credentials.id,
+                )
+                # Wait until the credentials are no longer in use anywhere
+                _lock = await self._acquire_lock(user_id, credentials.id)
+                try:
+                    fresh_credentials = await oauth_handler.refresh_tokens(credentials)
+                    await self.store.update_creds(user_id, fresh_credentials)
+                    _invoke_creds_changed_hook(user_id, fresh_credentials.provider)
+                    credentials = fresh_credentials
+                finally:
+                    if (await _lock.locked()) and (await _lock.owned()):
+                        try:
+                            await _lock.release()
+                        except Exception:
+                            logger.warning(
+                                "Failed to release OAuth refresh lock",
+                                exc_info=True,
+                            )
+        return credentials
+
+    async def _refresh_unlocked(
+        self, user_id: str, credentials: OAuth2Credentials
+    ) -> OAuth2Credentials:
+        """Best-effort token refresh without any Redis locking.
+
+        Safe for use from multi-threaded contexts (e.g. copilot workers) where
+        each thread has its own event loop and sharing Redis-backed asyncio locks
+        is not possible.  Concurrent refreshes are tolerated: the last writer
+        wins, and stale tokens are overwritten.
+        """
+        oauth_handler = await self._get_oauth_handler(credentials)
+        if oauth_handler.needs_refresh(credentials):
+            logger.debug(
+                "Refreshing '%s' credentials #%s (lock-free)",
+                credentials.provider,
+                credentials.id,
+            )
+            fresh_credentials = await oauth_handler.refresh_tokens(credentials)
+            await self.store.update_creds(user_id, fresh_credentials)
+            _invoke_creds_changed_hook(user_id, fresh_credentials.provider)
+            credentials = fresh_credentials
+        return credentials
+
+    async def update(self, user_id: str, updated: Credentials) -> None:
+        async with self._locked(user_id, updated.id):
+            await self.store.update_creds(user_id, updated)
+        # Notify listeners so the updated credential is picked up immediately.
+        _invoke_creds_changed_hook(user_id, updated.provider)
+
+    async def delete(self, user_id: str, credentials_id: str) -> None:
+        async with self._locked(user_id, credentials_id):
+            # Read inside the lock to avoid TOCTOU — another coroutine could
+            # delete the same credential between the read and the delete.
+            creds = await self.store.get_creds_by_id(user_id, credentials_id)
+            await self.store.delete_creds_by_id(user_id, credentials_id)
+        if creds:
+            _invoke_creds_changed_hook(user_id, creds.provider)
 
     # -- Locking utilities -- #
 
-    def _acquire_lock(self, user_id: str, credentials_id: str, *args: str) -> RedisLock:
+    async def _acquire_lock(
+        self, user_id: str, credentials_id: str, *args: str
+    ) -> AsyncRedisLock:
         key = (
-            self.store.db_manager,
             f"user:{user_id}",
             f"credentials:{credentials_id}",
             *args,
         )
-        return self._locks.acquire(key)
+        locks = await self.locks()
+        return await locks.acquire(key)
 
-    @contextmanager
-    def _locked(self, user_id: str, credentials_id: str, *args: str):
-        lock = self._acquire_lock(user_id, credentials_id, *args)
+    @asynccontextmanager
+    async def _locked(self, user_id: str, credentials_id: str, *args: str):
+        lock = await self._acquire_lock(user_id, credentials_id, *args)
         try:
             yield
         finally:
-            lock.release()
+            if (await lock.locked()) and (await lock.owned()):
+                try:
+                    await lock.release()
+                except Exception:
+                    logger.warning(
+                        "Failed to release credentials lock",
+                        exc_info=True,
+                    )
 
-    def release_all_locks(self):
+    async def release_all_locks(self):
         """Call this on process termination to ensure all locks are released"""
-        self._locks.release_all_locks()
-        self.store.locks.release_all_locks()
+        await (await self.store.locks()).release_all_locks()
 
 
-def _get_provider_oauth_handler(provider_name: str) -> BaseOAuthHandler:
+async def _get_provider_oauth_handler(provider_name_str: str) -> "BaseOAuthHandler":
+    provider_name = ProviderName(provider_name_str)
     if provider_name not in HANDLERS_BY_NAME:
         raise KeyError(f"Unknown provider '{provider_name}'")
 
-    client_id = getattr(settings.secrets, f"{provider_name}_client_id")
-    client_secret = getattr(settings.secrets, f"{provider_name}_client_secret")
+    provider_creds = CREDENTIALS_BY_PROVIDER[provider_name]
+    if not provider_creds.use_secrets:
+        # This is safe to do as we check that the env vars exist in the registry
+        client_id = (
+            os.getenv(provider_creds.client_id_env_var)
+            if provider_creds.client_id_env_var
+            else None
+        )
+        client_secret = (
+            os.getenv(provider_creds.client_secret_env_var)
+            if provider_creds.client_secret_env_var
+            else None
+        )
+    else:
+        client_id = getattr(settings.secrets, f"{provider_name.value}_client_id")
+        client_secret = getattr(
+            settings.secrets, f"{provider_name.value}_client_secret"
+        )
+
     if not (client_id and client_secret):
-        raise Exception(  # TODO: ConfigError
+        raise MissingConfigError(
             f"Integration with provider '{provider_name}' is not configured",
         )
 
     handler_class = HANDLERS_BY_NAME[provider_name]
-    frontend_base_url = settings.config.frontend_base_url
+    frontend_base_url = (
+        settings.config.frontend_base_url or settings.config.platform_base_url
+    )
     return handler_class(
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=f"{frontend_base_url}/auth/integrations/oauth_callback",
+    )
+
+
+def create_mcp_oauth_handler(
+    credentials: OAuth2Credentials,
+) -> "BaseOAuthHandler":
+    """Create an MCPOAuthHandler from credential metadata for token refresh.
+
+    MCP OAuth handlers have dynamic endpoints discovered per-server, so they
+    can't be registered as singletons in HANDLERS_BY_NAME. Instead, the handler
+    is reconstructed from metadata stored on the credential during initial auth.
+    """
+    from backend.blocks.mcp.oauth import MCPOAuthHandler
+
+    meta = credentials.metadata or {}
+    token_url = meta.get("mcp_token_url", "")
+    if not token_url:
+        raise ValueError(
+            f"MCP credential {credentials.id} is missing 'mcp_token_url' metadata; "
+            "cannot refresh tokens"
+        )
+    return MCPOAuthHandler(
+        client_id=meta.get("mcp_client_id", ""),
+        client_secret=meta.get("mcp_client_secret", ""),
+        redirect_uri="",  # Not needed for token refresh
+        authorize_url="",  # Not needed for token refresh
+        token_url=token_url,
+        resource_url=meta.get("mcp_resource_url"),
     )
