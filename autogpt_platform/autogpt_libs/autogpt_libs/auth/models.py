@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 
+DEFAULT_USER_ID = "3e53486c-cf57-477e-ba2a-cb02dc828e1a"
+DEFAULT_EMAIL = "default@example.com"
+
 
 # Using dataclass here to avoid adding dependency on pydantic
 @dataclass(frozen=True)
@@ -17,3 +20,16 @@ class User:
             phone_number=payload.get("phone", ""),
             role=payload["role"],
         )
+
+
+@dataclass(frozen=True)
+class RequestContext:
+    user_id: str
+    org_id: str
+    team_id: str | None  # None = org-home context
+    is_org_owner: bool
+    is_org_admin: bool
+    is_org_billing_manager: bool
+    is_team_admin: bool
+    is_team_billing_manager: bool
+    seat_status: str  # ACTIVE, INACTIVE, PENDING, NONE
