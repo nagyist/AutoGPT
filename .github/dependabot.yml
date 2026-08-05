@@ -7,17 +7,22 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
     target-branch: "dev"
+    commit-message:
+      prefix: "chore(libs/deps)"
+      prefix-development: "chore(libs/deps-dev)"
+    ignore:
+      - dependency-name: "poetry"
     groups:
       production-dependencies:
         dependency-type: "production"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
 
   # backend (Poetry project)
   - package-ecosystem: "pip"
@@ -26,18 +31,22 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
     target-branch: "dev"
+    commit-message:
+      prefix: "chore(backend/deps)"
+      prefix-development: "chore(backend/deps-dev)"
+    ignore:
+      - dependency-name: "poetry"
     groups:
       production-dependencies:
         dependency-type: "production"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
         update-types:
-        - "minor"
-        - "patch"
-
+          - "minor"
+          - "patch"
 
   # frontend (Next.js project)
   - package-ecosystem: "npm"
@@ -46,18 +55,20 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
     target-branch: "dev"
+    commit-message:
+      prefix: "chore(frontend/deps)"
+      prefix-development: "chore(frontend/deps-dev)"
     groups:
       production-dependencies:
         dependency-type: "production"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
         update-types:
-        - "minor"
-        - "patch"
-
+          - "minor"
+          - "patch"
 
   # infra (Terraform)
   - package-ecosystem: "terraform"
@@ -66,38 +77,21 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     target-branch: "dev"
+    commit-message:
+      prefix: "chore(infra/deps)"
+      prefix-development: "chore(infra/deps-dev)"
+
     groups:
       production-dependencies:
         dependency-type: "production"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
         update-types:
-        - "minor"
-        - "patch"
-
-
-  # market (Poetry project)
-  - package-ecosystem: "pip"
-    directory: "autogpt_platform/market"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
-    target-branch: "dev"
-    groups:
-      production-dependencies:
-        dependency-type: "production"
-        update-types:
-        - "minor"
-        - "patch"
-      development-dependencies:
-        dependency-type: "development"
-        update-types:
-        - "minor"
-        - "patch"
-
+          - "minor"
+          - "patch"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -110,14 +104,13 @@ updates:
       production-dependencies:
         dependency-type: "production"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
         update-types:
-        - "minor"
-        - "patch"
-
+          - "minor"
+          - "patch"
 
   # Docker
   - package-ecosystem: "docker"
@@ -130,50 +123,31 @@ updates:
       production-dependencies:
         dependency-type: "production"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
         update-types:
-        - "minor"
-        - "patch"
-
-
-  # Submodules
-  - package-ecosystem: "gitsubmodule"
-    directory: "autogpt_platform/supabase"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 1
-    target-branch: "dev"
-    groups:
-      production-dependencies:
-        dependency-type: "production"
-        update-types:
-        - "minor"
-        - "patch"
-      development-dependencies:
-        dependency-type: "development"
-        update-types:
-        - "minor"
-        - "patch"
-
+          - "minor"
+          - "patch"
 
   # Docs
-  - package-ecosystem: 'pip'
+  - package-ecosystem: "pip"
     directory: "docs/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 1
     target-branch: "dev"
+    commit-message:
+      prefix: "chore(docs/deps)"
     groups:
       production-dependencies:
         dependency-type: "production"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"

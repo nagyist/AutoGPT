@@ -1,9 +1,18 @@
-import requests
+import re
+from typing import Literal
+
 from typing_extensions import TypedDict
 
-from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema
+from backend.blocks._base import (
+    Block,
+    BlockCategory,
+    BlockOutput,
+    BlockSchemaInput,
+    BlockSchemaOutput,
+)
 from backend.data.model import SchemaField
 
+from ._api import get_api
 from ._auth import (
     TEST_CREDENTIALS,
     TEST_CREDENTIALS_INPUT,
@@ -12,16 +21,18 @@ from ._auth import (
     GithubCredentialsInput,
 )
 
+MergeMethod = Literal["merge", "squash", "rebase"]
+
 
 class GithubListPullRequestsBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
             placeholder="https://github.com/owner/repo",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         class PRItem(TypedDict):
             title: str
             url: str
@@ -29,7 +40,12 @@ class GithubListPullRequestsBlock(Block):
         pull_request: PRItem = SchemaField(
             title="Pull Request", description="PRs with their title and URL"
         )
-        error: str = SchemaField(description="Error message if listing issues failed")
+        pull_requests: list[PRItem] = SchemaField(
+            description="List of pull requests with their title and URL"
+        )
+        error: str = SchemaField(
+            description="Error message if listing pull requests failed"
+        )
 
     def __init__(self):
         super().__init__(
@@ -45,12 +61,21 @@ class GithubListPullRequestsBlock(Block):
             test_credentials=TEST_CREDENTIALS,
             test_output=[
                 (
+                    "pull_requests",
+                    [
+                        {
+                            "title": "Pull request 1",
+                            "url": "https://github.com/owner/repo/pull/1",
+                        }
+                    ],
+                ),
+                (
                     "pull_request",
                     {
                         "title": "Pull request 1",
                         "url": "https://github.com/owner/repo/pull/1",
                     },
-                )
+                ),
             ],
             test_mock={
                 "list_prs": lambda *args, **kwargs: [
@@ -63,39 +88,36 @@ class GithubListPullRequestsBlock(Block):
         )
 
     @staticmethod
-    def list_prs(credentials: GithubCredentials, repo_url: str) -> list[Output.PRItem]:
-        api_url = repo_url.replace("github.com", "api.github.com/repos") + "/pulls"
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
+    async def list_prs(
+        credentials: GithubCredentials, repo_url: str
+    ) -> list[Output.PRItem]:
+        api = get_api(credentials)
+        pulls_url = repo_url + "/pulls"
+        response = await api.get(pulls_url)
         data = response.json()
         pull_requests: list[GithubListPullRequestsBlock.Output.PRItem] = [
             {"title": pr["title"], "url": pr["html_url"]} for pr in data
         ]
-
         return pull_requests
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        pull_requests = self.list_prs(
+        pull_requests = await self.list_prs(
             credentials,
             input_data.repo_url,
         )
-        yield from (("pull_request", pr) for pr in pull_requests)
+        yield "pull_requests", pull_requests
+        for pr in pull_requests:
+            yield "pull_request", pr
 
 
 class GithubMakePullRequestBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         repo_url: str = SchemaField(
             description="URL of the GitHub repository",
@@ -110,7 +132,11 @@ class GithubMakePullRequestBlock(Block):
             placeholder="Enter the pull request body",
         )
         head: str = SchemaField(
-            description="The name of the branch where your changes are implemented. For cross-repository pull requests in the same network, namespace head with a user like this: username:branch.",
+            description=(
+                "The name of the branch where your changes are implemented. "
+                "For cross-repository pull requests in the same network, "
+                "namespace head with a user like this: username:branch."
+            ),
             placeholder="Enter the head branch",
         )
         base: str = SchemaField(
@@ -118,7 +144,7 @@ class GithubMakePullRequestBlock(Block):
             placeholder="Enter the base branch",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         number: int = SchemaField(description="Number of the created pull request")
         url: str = SchemaField(description="URL of the created pull request")
         error: str = SchemaField(
@@ -154,7 +180,7 @@ class GithubMakePullRequestBlock(Block):
         )
 
     @staticmethod
-    def create_pr(
+    async def create_pr(
         credentials: GithubCredentials,
         repo_url: str,
         title: str,
@@ -162,21 +188,14 @@ class GithubMakePullRequestBlock(Block):
         head: str,
         base: str,
     ) -> tuple[int, str]:
-        repo_path = repo_url.replace("https://github.com/", "")
-        api_url = f"https://api.github.com/repos/{repo_path}/pulls"
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
+        api = get_api(credentials)
+        pulls_url = repo_url + "/pulls"
         data = {"title": title, "body": body, "head": head, "base": base}
-
-        response = requests.post(api_url, headers=headers, json=data)
-        response.raise_for_status()
-
+        response = await api.post(pulls_url, json=data)
         pr_data = response.json()
         return pr_data["number"], pr_data["html_url"]
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
@@ -184,7 +203,7 @@ class GithubMakePullRequestBlock(Block):
         **kwargs,
     ) -> BlockOutput:
         try:
-            number, url = self.create_pr(
+            number, url = await self.create_pr(
                 credentials,
                 input_data.repo_url,
                 input_data.title,
@@ -194,17 +213,12 @@ class GithubMakePullRequestBlock(Block):
             )
             yield "number", number
             yield "url", url
-        except requests.exceptions.HTTPError as http_err:
-            if http_err.response.status_code == 422:
-                error_details = http_err.response.json()
-                error_message = error_details.get("message", "Unknown error")
-            else:
-                error_message = str(http_err)
-            raise RuntimeError(f"Failed to create pull request: {error_message}")
+        except Exception as e:
+            yield "error", str(e)
 
 
 class GithubReadPullRequestBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         pr_url: str = SchemaField(
             description="URL of the GitHub pull request",
@@ -213,9 +227,10 @@ class GithubReadPullRequestBlock(Block):
         include_pr_changes: bool = SchemaField(
             description="Whether to include the changes made in the pull request",
             default=False,
+            advanced=False,
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         title: str = SchemaField(description="Title of the pull request")
         body: str = SchemaField(description="Body of the pull request")
         author: str = SchemaField(description="User who created the pull request")
@@ -254,61 +269,55 @@ class GithubReadPullRequestBlock(Block):
         )
 
     @staticmethod
-    def read_pr(credentials: GithubCredentials, pr_url: str) -> tuple[str, str, str]:
-        api_url = pr_url.replace("github.com", "api.github.com/repos").replace(
-            "/pull/", "/issues/"
-        )
-
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
+    async def read_pr(
+        credentials: GithubCredentials, pr_url: str
+    ) -> tuple[str, str, str]:
+        api = get_api(credentials)
+        issue_url = pr_url.replace("/pull/", "/issues/")
+        response = await api.get(issue_url)
         data = response.json()
         title = data.get("title", "No title found")
         body = data.get("body", "No body content found")
-        author = data.get("user", {}).get("login", "No user found")
-
+        author = data.get("user", {}).get("login", "Unknown author")
         return title, body, author
 
     @staticmethod
-    def read_pr_changes(credentials: GithubCredentials, pr_url: str) -> str:
-        api_url = (
-            pr_url.replace("github.com", "api.github.com/repos").replace(
-                "/pull/", "/pulls/"
-            )
-            + "/files"
-        )
-
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
+    async def read_pr_changes(credentials: GithubCredentials, pr_url: str) -> str:
+        api = get_api(credentials)
+        files_url = prepare_pr_api_url(pr_url=pr_url, path="files")
+        response = await api.get(files_url)
         files = response.json()
         changes = []
         for file in files:
-            filename = file.get("filename")
-            patch = file.get("patch")
-            if filename and patch:
-                changes.append(f"File: {filename}\n{patch}")
+            status: str = file.get("status", "")
+            diff: str = file.get("patch", "")
+            if status != "removed":
+                is_filename: str = file.get("filename", "")
+                was_filename: str = (
+                    file.get("previous_filename", is_filename)
+                    if status != "added"
+                    else ""
+                )
+            else:
+                is_filename = ""
+                was_filename: str = file.get("filename", "")
 
+            patch_header = ""
+            if was_filename:
+                patch_header += f"--- {was_filename}\n"
+            if is_filename:
+                patch_header += f"+++ {is_filename}\n"
+            changes.append(patch_header + diff)
         return "\n\n".join(changes)
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        title, body, author = self.read_pr(
+        title, body, author = await self.read_pr(
             credentials,
             input_data.pr_url,
         )
@@ -317,7 +326,7 @@ class GithubReadPullRequestBlock(Block):
         yield "author", author
 
         if input_data.include_pr_changes:
-            changes = self.read_pr_changes(
+            changes = await self.read_pr_changes(
                 credentials,
                 input_data.pr_url,
             )
@@ -325,7 +334,7 @@ class GithubReadPullRequestBlock(Block):
 
 
 class GithubAssignPRReviewerBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         pr_url: str = SchemaField(
             description="URL of the GitHub pull request",
@@ -336,7 +345,7 @@ class GithubAssignPRReviewerBlock(Block):
             placeholder="Enter the reviewer's username",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         status: str = SchemaField(
             description="Status of the reviewer assignment operation"
         )
@@ -364,29 +373,16 @@ class GithubAssignPRReviewerBlock(Block):
         )
 
     @staticmethod
-    def assign_reviewer(
+    async def assign_reviewer(
         credentials: GithubCredentials, pr_url: str, reviewer: str
     ) -> str:
-        # Convert the PR URL to the appropriate API endpoint
-        api_url = (
-            pr_url.replace("github.com", "api.github.com/repos").replace(
-                "/pull/", "/pulls/"
-            )
-            + "/requested_reviewers"
-        )
-
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
+        api = get_api(credentials)
+        reviewers_url = prepare_pr_api_url(pr_url=pr_url, path="requested_reviewers")
         data = {"reviewers": [reviewer]}
-
-        response = requests.post(api_url, headers=headers, json=data)
-        response.raise_for_status()
-
+        await api.post(reviewers_url, json=data)
         return "Reviewer assigned successfully"
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
@@ -394,27 +390,18 @@ class GithubAssignPRReviewerBlock(Block):
         **kwargs,
     ) -> BlockOutput:
         try:
-            status = self.assign_reviewer(
+            status = await self.assign_reviewer(
                 credentials,
                 input_data.pr_url,
                 input_data.reviewer,
             )
             yield "status", status
-        except requests.exceptions.HTTPError as http_err:
-            if http_err.response.status_code == 422:
-                error_msg = (
-                    "Failed to assign reviewer: "
-                    f"The reviewer '{input_data.reviewer}' may not have permission "
-                    "or the pull request is not in a valid state. "
-                    f"Detailed error: {http_err.response.text}"
-                )
-            else:
-                error_msg = f"HTTP error: {http_err} - {http_err.response.text}"
-            raise RuntimeError(error_msg)
+        except Exception as e:
+            yield "error", str(e)
 
 
 class GithubUnassignPRReviewerBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         pr_url: str = SchemaField(
             description="URL of the GitHub pull request",
@@ -425,7 +412,7 @@ class GithubUnassignPRReviewerBlock(Block):
             placeholder="Enter the reviewer's username",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         status: str = SchemaField(
             description="Status of the reviewer unassignment operation"
         )
@@ -453,50 +440,42 @@ class GithubUnassignPRReviewerBlock(Block):
         )
 
     @staticmethod
-    def unassign_reviewer(
+    async def unassign_reviewer(
         credentials: GithubCredentials, pr_url: str, reviewer: str
     ) -> str:
-        api_url = (
-            pr_url.replace("github.com", "api.github.com/repos").replace(
-                "/pull/", "/pulls/"
-            )
-            + "/requested_reviewers"
-        )
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
+        api = get_api(credentials)
+        reviewers_url = prepare_pr_api_url(pr_url=pr_url, path="requested_reviewers")
         data = {"reviewers": [reviewer]}
-
-        response = requests.delete(api_url, headers=headers, json=data)
-        response.raise_for_status()
-
+        await api.delete(reviewers_url, json=data)
         return "Reviewer unassigned successfully"
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        status = self.unassign_reviewer(
-            credentials,
-            input_data.pr_url,
-            input_data.reviewer,
-        )
-        yield "status", status
+        try:
+            status = await self.unassign_reviewer(
+                credentials,
+                input_data.pr_url,
+                input_data.reviewer,
+            )
+            yield "status", status
+        except Exception as e:
+            yield "error", str(e)
 
 
 class GithubListPRReviewersBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         credentials: GithubCredentialsInput = GithubCredentialsField("repo")
         pr_url: str = SchemaField(
             description="URL of the GitHub pull request",
             placeholder="https://github.com/owner/repo/pull/1",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         class ReviewerItem(TypedDict):
             username: str
             url: str
@@ -504,6 +483,9 @@ class GithubListPRReviewersBlock(Block):
         reviewer: ReviewerItem = SchemaField(
             title="Reviewer",
             description="Reviewers with their username and profile URL",
+        )
+        reviewers: list[ReviewerItem] = SchemaField(
+            description="List of reviewers with their username and profile URL"
         )
         error: str = SchemaField(
             description="Error message if listing reviewers failed"
@@ -523,12 +505,21 @@ class GithubListPRReviewersBlock(Block):
             test_credentials=TEST_CREDENTIALS,
             test_output=[
                 (
+                    "reviewers",
+                    [
+                        {
+                            "username": "reviewer1",
+                            "url": "https://github.com/reviewer1",
+                        }
+                    ],
+                ),
+                (
                     "reviewer",
                     {
                         "username": "reviewer1",
                         "url": "https://github.com/reviewer1",
                     },
-                )
+                ),
             ],
             test_mock={
                 "list_reviewers": lambda *args, **kwargs: [
@@ -541,40 +532,138 @@ class GithubListPRReviewersBlock(Block):
         )
 
     @staticmethod
-    def list_reviewers(
+    async def list_reviewers(
         credentials: GithubCredentials, pr_url: str
     ) -> list[Output.ReviewerItem]:
-        api_url = (
-            pr_url.replace("github.com", "api.github.com/repos").replace(
-                "/pull/", "/pulls/"
-            )
-            + "/requested_reviewers"
-        )
-        headers = {
-            "Authorization": credentials.bearer(),
-            "Accept": "application/vnd.github.v3+json",
-        }
-
-        response = requests.get(api_url, headers=headers)
-        response.raise_for_status()
-
+        api = get_api(credentials)
+        reviewers_url = prepare_pr_api_url(pr_url=pr_url, path="requested_reviewers")
+        response = await api.get(reviewers_url)
         data = response.json()
         reviewers: list[GithubListPRReviewersBlock.Output.ReviewerItem] = [
             {"username": reviewer["login"], "url": reviewer["html_url"]}
             for reviewer in data.get("users", [])
         ]
-
         return reviewers
 
-    def run(
+    async def run(
         self,
         input_data: Input,
         *,
         credentials: GithubCredentials,
         **kwargs,
     ) -> BlockOutput:
-        reviewers = self.list_reviewers(
+        reviewers = await self.list_reviewers(
             credentials,
             input_data.pr_url,
         )
-        yield from (("reviewer", reviewer) for reviewer in reviewers)
+        yield "reviewers", reviewers
+        for reviewer in reviewers:
+            yield "reviewer", reviewer
+
+
+class GithubMergePullRequestBlock(Block):
+    class Input(BlockSchemaInput):
+        credentials: GithubCredentialsInput = GithubCredentialsField("repo")
+        pr_url: str = SchemaField(
+            description="URL of the GitHub pull request",
+            placeholder="https://github.com/owner/repo/pull/1",
+        )
+        merge_method: MergeMethod = SchemaField(
+            description="Merge method to use: merge, squash, or rebase",
+            default="merge",
+        )
+        commit_title: str = SchemaField(
+            description="Title for the merge commit (optional, used for merge and squash)",
+            default="",
+        )
+        commit_message: str = SchemaField(
+            description="Message for the merge commit (optional, used for merge and squash)",
+            default="",
+        )
+
+    class Output(BlockSchemaOutput):
+        sha: str = SchemaField(description="SHA of the merge commit")
+        merged: bool = SchemaField(description="Whether the PR was merged")
+        message: str = SchemaField(description="Merge status message")
+        error: str = SchemaField(description="Error message if the merge failed")
+
+    def __init__(self):
+        super().__init__(
+            id="77456c22-33d8-4fd4-9eef-50b46a35bb48",
+            description="This block merges a pull request using merge, squash, or rebase.",
+            categories={BlockCategory.DEVELOPER_TOOLS},
+            input_schema=GithubMergePullRequestBlock.Input,
+            output_schema=GithubMergePullRequestBlock.Output,
+            test_input={
+                "pr_url": "https://github.com/owner/repo/pull/1",
+                "merge_method": "squash",
+                "commit_title": "",
+                "commit_message": "",
+                "credentials": TEST_CREDENTIALS_INPUT,
+            },
+            test_credentials=TEST_CREDENTIALS,
+            test_output=[
+                ("sha", "abc123"),
+                ("merged", True),
+                ("message", "Pull Request successfully merged"),
+            ],
+            test_mock={
+                "merge_pr": lambda *args, **kwargs: (
+                    "abc123",
+                    True,
+                    "Pull Request successfully merged",
+                )
+            },
+            is_sensitive_action=True,
+        )
+
+    @staticmethod
+    async def merge_pr(
+        credentials: GithubCredentials,
+        pr_url: str,
+        merge_method: MergeMethod,
+        commit_title: str,
+        commit_message: str,
+    ) -> tuple[str, bool, str]:
+        api = get_api(credentials)
+        merge_url = prepare_pr_api_url(pr_url=pr_url, path="merge")
+        data: dict[str, str] = {"merge_method": merge_method}
+        if commit_title:
+            data["commit_title"] = commit_title
+        if commit_message:
+            data["commit_message"] = commit_message
+        response = await api.put(merge_url, json=data)
+        result = response.json()
+        return result["sha"], result["merged"], result["message"]
+
+    async def run(
+        self,
+        input_data: Input,
+        *,
+        credentials: GithubCredentials,
+        **kwargs,
+    ) -> BlockOutput:
+        try:
+            sha, merged, message = await self.merge_pr(
+                credentials,
+                input_data.pr_url,
+                input_data.merge_method,
+                input_data.commit_title,
+                input_data.commit_message,
+            )
+            yield "sha", sha
+            yield "merged", merged
+            yield "message", message
+        except Exception as e:
+            yield "error", str(e)
+
+
+def prepare_pr_api_url(pr_url: str, path: str) -> str:
+    # Pattern to capture the base repository URL and the pull request number
+    pattern = r"^(?:(https?)://)?([^/]+/[^/]+/[^/]+)/pull/(\d+)"
+    match = re.match(pattern, pr_url)
+    if not match:
+        return pr_url
+
+    scheme, base_url, pr_number = match.groups()
+    return f"{scheme or 'https'}://{base_url}/pulls/{pr_number}/{path}"
