@@ -1,0 +1,252 @@
+"""
+MCP OAuth handler for MCP servers that use OAuth 2.1 authorization.
+
+Unlike other OAuth handlers (GitHub, Google, etc.) where endpoints are fixed,
+MCP servers have dynamic endpoints discovered via RFC 9728 / RFC 8414 metadata.
+This handler accepts those endpoints at construction time.
+"""
+
+import logging
+import time
+import urllib.parse
+from base64 import b64encode
+from typing import ClassVar, Literal, Optional
+
+from pydantic import SecretStr
+
+from backend.data.model import OAuth2Credentials
+from backend.integrations.oauth.base import BaseOAuthHandler, parse_granted_scopes
+from backend.integrations.providers import ProviderName
+from backend.util.request import Requests, Response
+
+logger = logging.getLogger(__name__)
+
+MCPTokenEndpointAuthMethod = Literal[
+    "none", "client_secret_post", "client_secret_basic"
+]
+
+
+class MCPOAuthHandler(BaseOAuthHandler):
+    """
+    OAuth handler for MCP servers with dynamically-discovered endpoints.
+
+    Construction requires the authorization and token endpoint URLs,
+    which are obtained via MCP OAuth metadata discovery
+    (``MCPClient.discover_auth`` + ``discover_auth_server_metadata``).
+    """
+
+    PROVIDER_NAME: ClassVar[ProviderName | str] = ProviderName.MCP
+    DEFAULT_SCOPES: ClassVar[list[str]] = []
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        redirect_uri: str,
+        *,
+        authorize_url: str,
+        token_url: str,
+        revoke_url: str | None = None,
+        resource_url: str | None = None,
+        token_endpoint_auth_method: MCPTokenEndpointAuthMethod | None = None,
+    ):
+        if token_endpoint_auth_method not in (
+            None,
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+        ):
+            raise ValueError("Unsupported MCP client authentication method")
+        self.client_id = client_id
+        self.token_endpoint_auth_method: MCPTokenEndpointAuthMethod = (
+            token_endpoint_auth_method
+            if token_endpoint_auth_method is not None
+            else "client_secret_post" if client_secret else "none"
+        )
+        self.client_secret = (
+            "" if self.token_endpoint_auth_method == "none" else client_secret
+        )
+        self.redirect_uri = redirect_uri
+        self.authorize_url = authorize_url
+        self.token_url = token_url
+        self.revoke_url = revoke_url
+        self.resource_url = resource_url
+
+    def get_login_url(
+        self,
+        scopes: list[str],
+        state: str,
+        code_challenge: Optional[str],
+    ) -> str:
+        scopes = self.handle_default_scopes(scopes)
+
+        params: dict[str, str] = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "state": state,
+        }
+        if scopes:
+            params["scope"] = " ".join(scopes)
+        # PKCE (S256) — included when the caller provides a code_challenge
+        if code_challenge:
+            params["code_challenge"] = code_challenge
+            params["code_challenge_method"] = "S256"
+        # MCP spec requires resource indicator (RFC 8707)
+        if self.resource_url:
+            params["resource"] = self.resource_url
+
+        return f"{self.authorize_url}?{urllib.parse.urlencode(params)}"
+
+    async def exchange_code_for_tokens(
+        self,
+        code: str,
+        scopes: list[str],
+        code_verifier: Optional[str],
+    ) -> OAuth2Credentials:
+        client_auth, headers = self._token_client_auth()
+        data: dict[str, str] = {
+            **client_auth,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.redirect_uri,
+        }
+        if code_verifier:
+            data["code_verifier"] = code_verifier
+        if self.resource_url:
+            data["resource"] = self.resource_url
+
+        response = await _post_client_form(self.token_url, data, headers)
+        tokens = response.json()
+
+        if "error" in tokens:
+            raise RuntimeError(
+                f"Token exchange failed: {tokens.get('error_description', tokens['error'])}"
+            )
+
+        if "access_token" not in tokens:
+            raise RuntimeError("OAuth token response missing 'access_token' field")
+
+        now = int(time.time())
+        expires_in = tokens.get("expires_in")
+
+        return OAuth2Credentials(
+            provider=self.PROVIDER_NAME,
+            title=None,
+            access_token=SecretStr(tokens["access_token"]),
+            refresh_token=(
+                SecretStr(tokens["refresh_token"])
+                if tokens.get("refresh_token")
+                else None
+            ),
+            access_token_expires_at=now + expires_in if expires_in else None,
+            refresh_token_expires_at=None,
+            scopes=parse_granted_scopes(tokens.get("scope"), fallback=scopes),
+            metadata={
+                "mcp_token_url": self.token_url,
+                "mcp_resource_url": self.resource_url,
+                "mcp_token_endpoint_auth_method": self.token_endpoint_auth_method,
+            },
+        )
+
+    async def _refresh_tokens(
+        self, credentials: OAuth2Credentials
+    ) -> OAuth2Credentials:
+        if not credentials.refresh_token:
+            raise ValueError("No refresh token available for MCP OAuth credentials")
+
+        client_auth, headers = self._token_client_auth()
+        data: dict[str, str] = {
+            **client_auth,
+            "grant_type": "refresh_token",
+            "refresh_token": credentials.refresh_token.get_secret_value(),
+        }
+        if self.resource_url:
+            data["resource"] = self.resource_url
+
+        response = await _post_client_form(self.token_url, data, headers)
+        tokens = response.json()
+
+        if "error" in tokens:
+            raise RuntimeError(
+                f"Token refresh failed: {tokens.get('error_description', tokens['error'])}"
+            )
+
+        if "access_token" not in tokens:
+            raise RuntimeError("OAuth refresh response missing 'access_token' field")
+
+        now = int(time.time())
+        expires_in = tokens.get("expires_in")
+
+        return OAuth2Credentials(
+            id=credentials.id,
+            provider=self.PROVIDER_NAME,
+            title=credentials.title,
+            access_token=SecretStr(tokens["access_token"]),
+            refresh_token=(
+                SecretStr(tokens["refresh_token"])
+                if tokens.get("refresh_token")
+                else credentials.refresh_token
+            ),
+            access_token_expires_at=now + expires_in if expires_in else None,
+            refresh_token_expires_at=credentials.refresh_token_expires_at,
+            scopes=credentials.scopes,
+            metadata=credentials.metadata,
+        )
+
+    async def revoke_tokens(self, credentials: OAuth2Credentials) -> bool:
+        if not self.revoke_url:
+            return False
+
+        try:
+            client_auth, headers = self._token_client_auth()
+            data = {
+                **client_auth,
+                "token": credentials.access_token.get_secret_value(),
+                "token_type_hint": "access_token",
+            }
+            await _post_client_form(self.revoke_url, data, headers)
+            return True
+        except Exception:
+            logger.warning("Failed to revoke MCP OAuth tokens", exc_info=True)
+            return False
+
+    def _token_client_auth(self) -> tuple[dict[str, str], dict[str, str]]:
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if self.token_endpoint_auth_method == "client_secret_basic":
+            client_id = urllib.parse.quote_plus(self.client_id, safe="")
+            client_secret = urllib.parse.quote_plus(self.client_secret, safe="")
+            encoded = b64encode(f"{client_id}:{client_secret}".encode()).decode()
+            headers["Authorization"] = f"Basic {encoded}"
+            # The secret stays in the header, but the id also goes in the body:
+            # RFC 6749 §2.3.1 allows it for identification, and servers that do
+            # not read the Basic header for the id reject the exchange outright
+            # (Miro answers "Missing client_id" and the sign-in dies after the
+            # user has already consented).
+            return {"client_id": self.client_id}, headers
+        data = {"client_id": self.client_id}
+        if self.token_endpoint_auth_method == "client_secret_post":
+            data["client_secret"] = self.client_secret
+        elif self.token_endpoint_auth_method != "none":
+            raise ValueError("Unsupported MCP client authentication method")
+        return data, headers
+
+
+async def _post_client_form(
+    url: str, data: dict[str, str], headers: dict[str, str]
+) -> Response:
+    """POST to a token or revocation endpoint without following redirects.
+
+    The form carries the client secret, the code or a token, and ``Requests``
+    re-sends the body on every hop, so a redirect would hand them to a host
+    outside the endpoints checked for the server's pre-registered app.
+    """
+    response = await Requests(raise_for_status=True).post(
+        url, data=data, headers=headers, allow_redirects=False
+    )
+    if response.status in (301, 302, 303, 307, 308):
+        raise RuntimeError(
+            f"OAuth endpoint {url} answered with a redirect (HTTP "
+            f"{response.status}), which is not followed with client credentials"
+        )
+    return response

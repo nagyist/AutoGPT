@@ -3,23 +3,24 @@ import os
 import signal
 import sys
 from abc import ABC, abstractmethod
-from multiprocessing import Process, set_start_method
-from typing import Optional
+from multiprocessing import Process, get_all_start_methods, set_start_method
+from typing import ClassVar, Optional
 
+from backend.util.feature_flag import initialize_feature_flags, shutdown_feature_flags
 from backend.util.logging import configure_logging
 from backend.util.metrics import sentry_init
+from backend.util.retry import stop_retry_loops
+from backend.util.secrets_guard import check_secrets
+from backend.util.settings import AppEnvironment, Config, set_service_name
 
 logger = logging.getLogger(__name__)
-_SERVICE_NAME = "MainProcess"
 
+config = Config()
 
-def get_service_name():
-    return _SERVICE_NAME
-
-
-def set_service_name(name: str):
-    global _SERVICE_NAME
-    _SERVICE_NAME = name
+# How long ``AppProcess.stop`` waits for a child to act on a signal before
+# escalating. Long enough for an orderly shutdown, short enough that a wedged
+# child cannot hold the parent open indefinitely.
+STOP_TIMEOUT_SECONDS = 30
 
 
 class AppProcess(ABC):
@@ -28,8 +29,18 @@ class AppProcess(ABC):
     """
 
     process: Optional[Process] = None
+    _shutting_down: bool = False
+    _cleaned_up: bool = False
+    # Opens the flag vendor's client before `run`, so no read waits on its
+    # first load. A service that never reads a flag opts out.
+    reads_feature_flags: ClassVar[bool] = True
 
-    set_start_method("spawn", force=True)
+    if "forkserver" in get_all_start_methods():
+        set_start_method("forkserver", force=True)
+    else:
+        logger.warning("Forkserver start method is not available. Using spawn instead.")
+        set_start_method("spawn", force=True)
+
     configure_logging()
     sentry_init()
 
@@ -42,10 +53,9 @@ class AppProcess(ABC):
         """
         pass
 
-    @classmethod
     @property
-    def service_name(cls) -> str:
-        return cls.__name__
+    def service_name(self) -> str:
+        return self.__class__.__name__
 
     def cleanup(self):
         """
@@ -54,14 +64,13 @@ class AppProcess(ABC):
         """
         pass
 
-    def health_check(self):
-        """
-        A method to check the health of the process.
-        """
-        pass
-
     def execute_run_command(self, silent):
         signal.signal(signal.SIGTERM, self._self_terminate)
+        signal.signal(signal.SIGINT, self._self_terminate)
+        # LOCAL has no vendor configured; its flags resolve to mock defaults.
+        start_flags = (
+            self.reads_feature_flags and config.app_env is not AppEnvironment.LOCAL
+        )
 
         try:
             if silent:
@@ -70,13 +79,52 @@ class AppProcess(ABC):
 
             set_service_name(self.service_name)
             logger.info(f"[{self.service_name}] Starting...")
+            if start_flags:
+                initialize_feature_flags()
             self.run()
-        except (KeyboardInterrupt, SystemExit) as e:
-            logger.warning(f"[{self.service_name}] Terminated: {e}; quitting...")
+        except BaseException as e:
+            logger.warning(
+                f"[{self.service_name}] 🛑 Terminating because of {type(e).__name__}: {e}",  # noqa
+                exc_info=e if not isinstance(e, SystemExit) else None,
+            )
+            # Send error to Sentry before cleanup
+            if not isinstance(e, (KeyboardInterrupt, SystemExit)):
+                try:
+                    from backend.util.metrics import sentry_capture_error
+
+                    sentry_capture_error(e)
+                except Exception:
+                    pass  # Silently ignore if Sentry isn't available
+        finally:
+            try:
+                if not self._cleaned_up:
+                    self._cleaned_up = True
+                    logger.info(f"[{self.service_name}] 🧹 Running cleanup")
+                    self.cleanup()
+                    logger.info(f"[{self.service_name}] ✅ Cleanup done")
+            finally:
+                # After cleanup, which can drain work that still reads flags.
+                if start_flags:
+                    shutdown_feature_flags()
+            logger.info(f"[{self.service_name}] 🛑 Terminated")
+
+    @staticmethod
+    def llprint(message: str):
+        """
+        Low-level print/log helper function for use in signal handlers.
+        Regular log/print statements are not allowed in signal handlers.
+        """
+        os.write(sys.stdout.fileno(), (message + "\n").encode())
 
     def _self_terminate(self, signum: int, frame):
-        self.cleanup()
-        sys.exit(0)
+        stop_retry_loops()
+        if not self._shutting_down:
+            self._shutting_down = True
+            sys.exit(0)
+        else:
+            self.llprint(
+                f"[{self.service_name}] Received exit signal {signum}, but cleanup is already underway."
+            )
 
     # Methods that are executed OUTSIDE the process #
 
@@ -97,6 +145,11 @@ class AppProcess(ABC):
         Returns:
             the process id or 0 if the process is not running in the background.
         """
+        # Startup guard: no service comes up on a missing or publicly-known
+        # secret. Deliberately here rather than at import time so tooling and
+        # tests that merely import backend modules are unaffected.
+        check_secrets()
+
         if not background:
             self.execute_run_command(silent)
             return 0
@@ -108,16 +161,33 @@ class AppProcess(ABC):
             **proc_args,
         )
         self.process.start()
-        self.health_check()
+        logger.info(f"[{self.service_name}] started with PID {self.process.pid}")
+
         return self.process.pid or 0
 
     def stop(self):
         """
         Stop the background process.
+
+        Both joins are bounded. An unbounded ``join()`` here wedges whoever is
+        shutting the service down when the child does not act on the SIGTERM —
+        in a test session that is the session fixture's teardown, so the run
+        finishes every test and then never prints its summary line.
         """
         if not self.process:
             return
 
+        pid = self.process.pid
         self.process.terminate()
-        self.process.join()
+        self.process.join(timeout=STOP_TIMEOUT_SECONDS)
+
+        if self.process.is_alive():
+            logger.warning(
+                f"[{self.service_name}] with PID {pid} ignored SIGTERM "
+                f"for {STOP_TIMEOUT_SECONDS}s; killing it"
+            )
+            self.process.kill()
+            self.process.join(timeout=STOP_TIMEOUT_SECONDS)
+
+        logger.info(f"[{self.service_name}] with PID {pid} stopped")
         self.process = None

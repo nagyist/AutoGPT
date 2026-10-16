@@ -1,0 +1,34 @@
+import { createSafeStorage } from "./safe-storage";
+
+export enum Key {
+  LOGOUT = "supabase-logout",
+  WEBSOCKET_DISCONNECT_INTENT = "websocket-disconnect-intent",
+  COPIED_FLOW_DATA = "copied-flow-data",
+  SHEPHERD_TOUR = "shepherd-tour",
+  WALLET_LAST_SEEN_CREDITS = "wallet-last-seen-credits",
+  LIBRARY_AGENTS_CACHE = "library-agents-cache",
+  CHAT_SESSION_ID = "chat_session_id",
+  AI_AGENT_SAFETY_POPUP_SHOWN = "ai-agent-safety-popup-shown",
+  COPILOT_SOUND_ENABLED = "copilot-sound-enabled",
+  COPILOT_NOTIFICATIONS_ENABLED = "copilot-notifications-enabled",
+  COPILOT_NOTIFICATION_BANNER_DISMISSED = "copilot-notification-banner-dismissed",
+  COPILOT_NOTIFICATION_DIALOG_DISMISSED = "copilot-notification-dialog-dismissed",
+  ACTIVE_ORG = "active-org-id",
+  ACTIVE_TEAM = "active-team-id",
+  COPILOT_ARTIFACT_PANEL_WIDTH = "copilot-artifact-panel-width",
+  COPILOT_CONTEXT_PANEL_WIDTH = "copilot-context-panel-width",
+  COPILOT_CONTEXT_PANEL_OPEN = "copilot-context-panel-open",
+  COPILOT_CONTEXT_PANEL_TAB = "copilot-context-panel-tab",
+  TEAM_WORKFLOWS_VIEW = "team-workflows-view",
+  COPILOT_MODE = "copilot-mode",
+  COPILOT_MODEL = "copilot-model",
+  COPILOT_COMPLETED_SESSIONS = "copilot-completed-sessions",
+  PUSH_SUBSCRIPTION_REGISTERED = "push-subscription-registered",
+  COPILOT_DRY_RUN = "copilot-dry-run",
+  COPILOT_VOICE_SILENCE_TIMEOUT = "copilot-voice-silence-timeout",
+  TOP_UP_MODAL_LAST_SHOWN = "top-up-modal-last-shown",
+  LOW_CREDIT_BANNER_DISMISSED = "low-credit-banner-dismissed",
+  BUILDER_MOBILE_WARNING_SUPPRESSED = "builder-mobile-warning-suppressed",
+}
+
+export const storage = createSafeStorage<Key>("local");

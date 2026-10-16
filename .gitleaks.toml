@@ -1,0 +1,30 @@
+title = "AutoGPT Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+    # Lock files
+    '''pnpm-lock\.yaml$''',
+    '''poetry\.lock$''',
+    # Secrets baseline
+    '''\.secrets\.baseline$''',
+    # Build artifacts and caches (should not be committed)
+    '''__pycache__/''',
+    '''classic/frontend/build/''',
+    # Docker dev setup (local dev JWTs/keys only)
+    '''autogpt_platform/db/docker/''',
+    # Test files with fake/fixture keys (_test.py, test_*.py, conftest.py)
+    '''(_test|test_.*|conftest)\.py$''',
+    # Documentation (only contains placeholder keys in curl/API examples)
+    '''docs/.*\.md$''',
+    # Firebase config (public API keys by design)
+    '''google-services\.json$''',
+    '''classic/frontend/(lib|web)/''',
+]
+regexes = [
+    # LLM model name enum values falsely flagged as API keys
+    '''Llama-\d.*Instruct''',
+]

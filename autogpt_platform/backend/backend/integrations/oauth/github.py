@@ -2,10 +2,11 @@ import time
 from typing import Optional
 from urllib.parse import urlencode
 
-import requests
-from autogpt_libs.supabase_integration_credentials_store import OAuth2Credentials
+from backend.data.model import OAuth2Credentials
+from backend.integrations.providers import ProviderName
+from backend.util.request import Requests
 
-from .base import BaseOAuthHandler
+from .base import BaseOAuthHandler, parse_granted_scopes
 
 
 # --8<-- [start:GithubOAuthHandlerExample]
@@ -23,7 +24,7 @@ class GitHubOAuthHandler(BaseOAuthHandler):
       access token *with no refresh token*.
     """  # noqa
 
-    PROVIDER_NAME = "github"
+    PROVIDER_NAME = ProviderName.GITHUB
 
     def __init__(self, client_id: str, client_secret: str, redirect_uri: str):
         self.client_id = client_id
@@ -33,7 +34,9 @@ class GitHubOAuthHandler(BaseOAuthHandler):
         self.token_url = "https://github.com/login/oauth/access_token"
         self.revoke_url = "https://api.github.com/applications/{client_id}/token"
 
-    def get_login_url(self, scopes: list[str], state: str) -> str:
+    def get_login_url(
+        self, scopes: list[str], state: str, code_challenge: Optional[str]
+    ) -> str:
         params = {
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
@@ -42,12 +45,14 @@ class GitHubOAuthHandler(BaseOAuthHandler):
         }
         return f"{self.auth_base_url}?{urlencode(params)}"
 
-    def exchange_code_for_tokens(
-        self, code: str, scopes: list[str]
+    async def exchange_code_for_tokens(
+        self, code: str, scopes: list[str], code_verifier: Optional[str]
     ) -> OAuth2Credentials:
-        return self._request_tokens({"code": code, "redirect_uri": self.redirect_uri})
+        return await self._request_tokens(
+            {"code": code, "redirect_uri": self.redirect_uri}
+        )
 
-    def revoke_tokens(self, credentials: OAuth2Credentials) -> bool:
+    async def revoke_tokens(self, credentials: OAuth2Credentials) -> bool:
         if not credentials.access_token:
             raise ValueError("No access token to revoke")
 
@@ -56,27 +61,29 @@ class GitHubOAuthHandler(BaseOAuthHandler):
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-        response = requests.delete(
+        await Requests().delete(
             url=self.revoke_url.format(client_id=self.client_id),
             auth=(self.client_id, self.client_secret),
             headers=headers,
             json={"access_token": credentials.access_token.get_secret_value()},
         )
-        response.raise_for_status()
         return True
 
-    def _refresh_tokens(self, credentials: OAuth2Credentials) -> OAuth2Credentials:
+    async def _refresh_tokens(
+        self, credentials: OAuth2Credentials
+    ) -> OAuth2Credentials:
         if not credentials.refresh_token:
             return credentials
 
-        return self._request_tokens(
+        return await self._request_tokens(
             {
                 "refresh_token": credentials.refresh_token.get_secret_value(),
                 "grant_type": "refresh_token",
-            }
+            },
+            current_credentials=credentials,
         )
 
-    def _request_tokens(
+    async def _request_tokens(
         self,
         params: dict[str, str],
         current_credentials: Optional[OAuth2Credentials] = None,
@@ -87,11 +94,12 @@ class GitHubOAuthHandler(BaseOAuthHandler):
             **params,
         }
         headers = {"Accept": "application/json"}
-        response = requests.post(self.token_url, data=request_body, headers=headers)
-        response.raise_for_status()
+        response = await Requests().post(
+            self.token_url, data=request_body, headers=headers
+        )
         token_data: dict = response.json()
 
-        username = self._request_username(token_data["access_token"])
+        username = await self._request_username(token_data["access_token"])
 
         now = int(time.time())
         new_credentials = OAuth2Credentials(
@@ -99,11 +107,11 @@ class GitHubOAuthHandler(BaseOAuthHandler):
             title=current_credentials.title if current_credentials else None,
             username=username,
             access_token=token_data["access_token"],
-            # Token refresh responses have an empty `scope` property (see docs),
-            # so we have to get the scope from the existing credentials object.
-            scopes=(
-                token_data.get("scope", "").split(",")
-                or (current_credentials.scopes if current_credentials else [])
+            # GitHub App refresh responses carry an empty `scope`, so on refresh
+            # the existing record is the only description of the grant.
+            scopes=parse_granted_scopes(
+                token_data.get("scope"),
+                fallback=current_credentials.scopes if current_credentials else [],
             ),
             # Refresh token and expiration intervals are only given if token expiration
             # is enabled in the GitHub App's settings.
@@ -123,7 +131,7 @@ class GitHubOAuthHandler(BaseOAuthHandler):
             new_credentials.id = current_credentials.id
         return new_credentials
 
-    def _request_username(self, access_token: str) -> str | None:
+    async def _request_username(self, access_token: str) -> str | None:
         url = "https://api.github.com/user"
         headers = {
             "Accept": "application/vnd.github+json",
@@ -131,13 +139,14 @@ class GitHubOAuthHandler(BaseOAuthHandler):
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-        response = requests.get(url, headers=headers)
+        response = await Requests().get(url, headers=headers)
 
         if not response.ok:
             return None
 
         # Get the login (username)
-        return response.json().get("login")
+        resp = response.json()
+        return resp.get("login")
 
 
 # --8<-- [end:GithubOAuthHandlerExample]

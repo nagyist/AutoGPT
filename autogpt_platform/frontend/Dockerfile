@@ -1,32 +1,60 @@
 # Base stage for both dev and prod
-FROM node:21-alpine AS base
+FROM node:24.21-alpine3.23 AS base
 WORKDIR /app
-COPY autogpt_platform/frontend/package.json autogpt_platform/frontend/yarn.lock ./
-RUN yarn install --frozen-lockfile
-
-# Dev stage
-FROM base AS dev
-ENV NODE_ENV=development
-COPY autogpt_platform/frontend/ .
-EXPOSE 3000
-CMD ["yarn", "run", "dev"]
+RUN corepack enable
+COPY autogpt_platform/frontend/package.json autogpt_platform/frontend/pnpm-lock.yaml ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm pnpm install --frozen-lockfile
 
 # Build stage for prod
 FROM base AS build
-COPY autogpt_platform/frontend/ .
-RUN yarn build
 
-# Prod stage
-FROM node:21-alpine AS prod
+COPY autogpt_platform/frontend/ .
+# Allow CI to opt-in to Playwright test build-time flags
+ARG NEXT_PUBLIC_PW_TEST="false"
+ENV NEXT_PUBLIC_PW_TEST=$NEXT_PUBLIC_PW_TEST
+ARG NEXT_PUBLIC_FRONTEND_BASE_URL
+# Allow CI to opt-in to browser sourcemaps for coverage path resolution.
+# Keep Docker builds defaulting to false to avoid the memory hit.
+ARG NEXT_PUBLIC_SOURCEMAPS="false"
+ENV NEXT_PUBLIC_SOURCEMAPS=$NEXT_PUBLIC_SOURCEMAPS
+# Allow CI's e2e build to skip Next.js's lint and type checks (CI runs them as their own jobs).
+ARG NEXT_SKIP_BUILD_CHECKS="false"
+ENV NEXT_SKIP_BUILD_CHECKS=$NEXT_SKIP_BUILD_CHECKS
+ENV NODE_ENV="production"
+# Merge env files appropriately based on environment
+RUN if [ -f .env.production ]; then \
+      # In CI/CD: merge defaults with production (production takes precedence)
+      cat .env.default .env.production > .env.merged && mv .env.merged .env.production; \
+    elif [ -f .env ]; then \
+      # Local with custom .env: merge defaults with .env
+      cat .env.default .env > .env.merged && mv .env.merged .env; \
+    else \
+      # Local without custom .env: use defaults
+      cp .env.default .env; \
+    fi
+RUN pnpm run generate:api
+# In CI, we want NEXT_PUBLIC_PW_TEST=true during build so Next.js inlines it
+# The cache mount keeps Next.js's webpack cache between builds (CI restores it too)
+RUN --mount=type=cache,target=/app/.next/cache,id=next-build-cache if [ "$NEXT_PUBLIC_PW_TEST" = "true" ]; then NEXT_PUBLIC_PW_TEST=true NODE_OPTIONS="--max-old-space-size=8192" pnpm build; else NODE_OPTIONS="--max-old-space-size=8192" pnpm build; fi
+
+# Prod stage - based on NextJS reference Dockerfile https://github.com/vercel/next.js/blob/64271354533ed16da51be5dce85f0dbd15f17517/examples/with-docker/Dockerfile
+FROM node:24.21-alpine3.23 AS prod
 ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
 WORKDIR /app
 
-COPY --from=build /app/package.json /app/yarn.lock ./
-RUN yarn install --frozen-lockfile
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
 
-COPY --from=build /app/.next ./.next
+RUN mkdir .next
+RUN chown nextjs:nodejs .next
+
+COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
+
 COPY --from=build /app/public ./public
-COPY --from=build /app/next.config.mjs ./next.config.mjs
+
+USER nextjs
 
 EXPOSE 3000
-CMD ["yarn", "start"]
+CMD ["node", "server.js"]

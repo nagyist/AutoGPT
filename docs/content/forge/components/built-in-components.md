@@ -69,7 +69,7 @@ Lets the agent execute non-interactive Shell commands and Python code. Python ex
 | `shell_denylist`         | List of prohibited shell commands                    | `List[str]`                 | `[]`              |
 | `docker_container_name`  | Name of the Docker container used for code execution | `str`                       | `"agent_sandbox"` |
 
-All shell command configurations are expected to be for convience only. This component is not secure and should not be used in production environments. It is recommended to use more appropriate sandboxing.
+All shell command configurations are expected to be for convenience only. This component is not secure and should not be used in production environments. It is recommended to use more appropriate sandboxing.
 
 ### CommandProvider
 
@@ -153,7 +153,7 @@ It is possible to use your own self-hosted Stable Diffusion WebUI with AutoGPT. 
 
 ## `WebSearchComponent`
 
-Allows agent to search the web. Google credentials aren't required for DuckDuckGo. [Instructions how to set up Google API key](../../AutoGPT/configuration/search.md)
+Allows agent to search the web. Google credentials aren't required for DuckDuckGo. [Instructions how to set up Google API key](../../classic/configuration/search.md)
 
 ### `WebSearchConfiguration`
 

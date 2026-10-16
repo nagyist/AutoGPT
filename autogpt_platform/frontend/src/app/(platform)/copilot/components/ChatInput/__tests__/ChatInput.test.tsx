@@ -1,0 +1,1412 @@
+import {
+  render,
+  screen,
+  fireEvent,
+  act,
+  waitFor,
+} from "@/tests/integrations/test-utils";
+import {
+  NEW_SCHEDULED_TASK_PROMPT,
+  NEW_SKILL_PROMPT,
+} from "@/components/contextual/guidedPrompts";
+import type { UIMessage } from "ai";
+import { useRef } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChatInput } from "../ChatInput";
+import { sdkStopStream, useCopilotStop } from "../../../useCopilotStop";
+import { toast } from "@/components/molecules/Toast/use-toast";
+import { ReportedSendError } from "@/app/(platform)/copilot/helpers/reportedSendError";
+
+const mockCancel =
+  vi.fn<(sessionId: string) => Promise<{ status: number; data: unknown }>>();
+let mockTransports: unknown = undefined;
+vi.mock("@/app/api/__generated__/endpoints/chat/chat", () => ({
+  useGetV2ListChatTransports: () => ({ data: mockTransports }),
+  postV2CancelSessionTask: (sessionId: string) => mockCancel(sessionId),
+  // A lone platform connection whose tiers resolve to one model: the picker
+  // presents nothing, which keeps these tests about the composer itself.
+  useGetV2ListChatConnections: () => ({
+    data: {
+      status: 200,
+      data: {
+        offers: [
+          {
+            offer_id: "platform:deployment",
+            provider_family: "autogpt",
+            display_name: "AutoGPT Platform",
+            auth_method: "deployment",
+            credential_id: null,
+            backed_by_label: "Your AutoGPT plan",
+            description: "New chats are backed by your AutoGPT plan.",
+            state: "ready",
+            selectable: true,
+            is_default: true,
+            tiers: [
+              {
+                tier: "standard",
+                label: "Balanced",
+                selectable: true,
+                display_model: "one-model",
+              },
+              {
+                tier: "advanced",
+                label: "Advanced",
+                selectable: true,
+                display_model: "one-model",
+              },
+            ],
+            limitations: [],
+          },
+        ],
+      },
+    },
+    isLoading: false,
+    isPending: false,
+    isError: false,
+  }),
+}));
+
+let mockCopilotLlmModel = "standard";
+const mockSetCopilotLlmModel = vi.fn((model: string) => {
+  mockCopilotLlmModel = model;
+});
+
+let mockCopilotLlmAuthProvider = "platform";
+
+let mockInitialPrompt: string | null = null;
+const mockSetInitialPrompt = vi.fn((value: string | null) => {
+  mockInitialPrompt = value;
+});
+
+vi.mock("@/app/(platform)/copilot/store", () => ({
+  useCopilotUIStore: () => ({
+    copilotLlmModel: mockCopilotLlmModel,
+    setCopilotLlmModel: mockSetCopilotLlmModel,
+    copilotLlmAuth: {
+      authProvider: mockCopilotLlmAuthProvider,
+      credentialId: null,
+    },
+    setCopilotLlmAuth: vi.fn(),
+    isDryRun: false,
+    setIsDryRun: vi.fn(),
+    initialPrompt: mockInitialPrompt,
+    setInitialPrompt: mockSetInitialPrompt,
+    sentMessageCount: 0,
+    notifyMessageSent: vi.fn(),
+  }),
+}));
+
+let mockFlagValue = false;
+vi.mock("@/services/feature-flags/use-get-flag", () => ({
+  Flag: { CHAT_MODE_OPTION: "CHAT_MODE_OPTION" },
+  useGetFlag: () => mockFlagValue,
+}));
+
+// Off by default so the rest of the suite sees the production-build behaviour.
+let mockTokenDevtoolEnabled = false;
+vi.mock("../../../tokenDevtool/gate", () => ({
+  isTokenDevtoolEnabled: () => mockTokenDevtoolEnabled,
+}));
+
+vi.mock("@/components/molecules/Toast/use-toast", () => ({
+  toast: vi.fn(),
+  useToast: () => ({ toast: vi.fn(), dismiss: vi.fn() }),
+}));
+
+const voiceRetry = vi.fn();
+const voiceDownload = vi.fn();
+const voiceDismiss = vi.fn();
+let mockTranscriptionError: string | null = null;
+let mockHasFailedRecording = false;
+let mockIsTranscribing = false;
+
+vi.mock("../useVoiceRecording", () => ({
+  useVoiceRecording: () => ({
+    isRecording: false,
+    isTranscribing: mockIsTranscribing,
+    transcriptionError: mockTranscriptionError,
+    hasFailedRecording: mockHasFailedRecording,
+    retryTranscription: voiceRetry,
+    downloadFailedRecording: voiceDownload,
+    dismissTranscriptionError: voiceDismiss,
+    elapsedTime: 0,
+    toggleRecording: vi.fn(),
+    handleKeyDown: vi.fn(),
+    showMicButton: false,
+    isInputDisabled: false,
+    audioStream: null,
+  }),
+}));
+
+vi.mock("@/components/ai-elements/prompt-input", () => ({
+  PromptInputSubmit: ({
+    disabled,
+    status,
+    onStop,
+  }: {
+    disabled?: boolean;
+    status?: string;
+    onStop?: () => void;
+  }) =>
+    status === "streaming" ? (
+      <button
+        type="button"
+        onClick={onStop}
+        data-testid="stop"
+        aria-label="Stop"
+      >
+        Stop
+      </button>
+    ) : (
+      <button disabled={disabled} data-testid="submit">
+        Send
+      </button>
+    ),
+  PromptInputTextarea: function PromptInputTextarea(props: {
+    id?: string;
+    value?: string;
+    onChange?: React.ChangeEventHandler<HTMLTextAreaElement>;
+    onPaste?: React.ClipboardEventHandler<HTMLTextAreaElement>;
+    disabled?: boolean;
+    placeholder?: string;
+  }) {
+    return (
+      <textarea
+        id={props.id}
+        value={props.value}
+        onChange={props.onChange}
+        onPaste={props.onPaste}
+        disabled={props.disabled}
+        placeholder={props.placeholder}
+        data-testid="textarea"
+      />
+    );
+  },
+  PromptInputButton: ({
+    children,
+    onClick,
+    "aria-label": ariaLabel,
+  }: {
+    children?: React.ReactNode;
+    onClick?: React.MouseEventHandler<HTMLButtonElement>;
+    "aria-label"?: string;
+  }) => (
+    <button aria-label={ariaLabel} onClick={onClick} data-testid="queue-btn">
+      {children}
+    </button>
+  ),
+}));
+
+// InputGroup/InputGroupAddon render as-is: they are plain presentational
+// wrappers, and stubbing them hid the addon contract (role, data-align,
+// click-to-focus) that the composer relies on.
+
+vi.mock("../components/ComposerPlusMenu", () => ({
+  ComposerPlusMenu: ({
+    onClearGuidedPrompt,
+  }: {
+    onClearGuidedPrompt?: () => void;
+  }) => (
+    <button
+      type="button"
+      data-testid="attachment-menu"
+      onClick={() => onClearGuidedPrompt?.()}
+    />
+  ),
+}));
+vi.mock("../components/FileChips", () => ({
+  FileChips: () => null,
+}));
+vi.mock("../components/RecordingButton", () => ({
+  RecordingButton: () => null,
+}));
+vi.mock("../components/RecordingIndicator", () => ({
+  RecordingIndicator: () => null,
+}));
+vi.mock("../components/DryRunToggleButton", () => ({
+  DryRunToggleButton: ({
+    onToggle,
+  }: {
+    isDryRun: boolean;
+    isStreaming: boolean;
+    readOnly: boolean;
+    onToggle: () => void;
+  }) => (
+    <button data-testid="dry-run-toggle" onClick={onToggle}>
+      Dry Run
+    </button>
+  ),
+}));
+
+const mockOnSend = vi.fn();
+
+afterEach(() => {
+  vi.clearAllMocks();
+  mockCancel.mockReset();
+  mockCopilotLlmModel = "standard";
+  mockCopilotLlmAuthProvider = "platform";
+  mockFlagValue = false;
+  mockTokenDevtoolEnabled = false;
+  mockInitialPrompt = null;
+  mockTranscriptionError = null;
+  mockHasFailedRecording = false;
+  mockIsTranscribing = false;
+});
+
+describe("ChatInput composer row", () => {
+  it("keeps the leading and trailing addons on their declared sides", () => {
+    render(<ChatInput onSend={mockOnSend} sessionId="session-1" />);
+
+    const aligns = Array.from(
+      document.querySelectorAll("[data-slot=input-group-addon]"),
+    ).map((addon) => addon.getAttribute("data-align"));
+
+    expect(aligns).toEqual(["inline-start", "inline-end"]);
+  });
+
+  it("focuses the message box when the addon gutter is clicked", () => {
+    render(<ChatInput onSend={mockOnSend} sessionId="session-1" />);
+
+    // The composer autofocuses on mount, so blur first — otherwise the
+    // assertion below would pass without the addon doing anything.
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    textarea.blur();
+    expect(document.activeElement).not.toBe(textarea);
+
+    fireEvent.click(
+      document.querySelector("[data-slot=input-group-addon]") as Element,
+    );
+
+    expect(document.activeElement).toBe(textarea);
+  });
+});
+
+describe("ChatInput token devtool badge", () => {
+  it("renders the badge while the brain-dump tray is disabled", () => {
+    // The tray is brain-dump-only; the badge must not depend on that flag.
+    mockFlagValue = false;
+    mockTokenDevtoolEnabled = true;
+    render(<ChatInput onSend={mockOnSend} sessionId="session-1" />);
+
+    expect(screen.getByRole("button", { name: /Token devtool/ })).toBeDefined();
+  });
+
+  it("renders the badge inside the tray when brain dump is enabled", () => {
+    mockFlagValue = true;
+    mockTokenDevtoolEnabled = true;
+    render(<ChatInput onSend={mockOnSend} sessionId="session-1" />);
+
+    expect(screen.getByRole("button", { name: /Token devtool/ })).toBeDefined();
+  });
+
+  it("stays hidden when the devtool gate is off", () => {
+    mockTokenDevtoolEnabled = false;
+    render(<ChatInput onSend={mockOnSend} sessionId="session-1" />);
+
+    expect(screen.queryByRole("button", { name: /Token devtool/ })).toBeNull();
+  });
+
+  it("stays hidden before a session exists", () => {
+    mockTokenDevtoolEnabled = true;
+    render(<ChatInput onSend={mockOnSend} sessionId={null} />);
+
+    expect(screen.queryByRole("button", { name: /Token devtool/ })).toBeNull();
+  });
+});
+
+describe("ChatInput Codex route", () => {
+  it("keeps Claude SDK file attachments available for the Codex route", () => {
+    mockCopilotLlmAuthProvider = "codex";
+    render(<ChatInput onSend={mockOnSend} />);
+
+    expect(screen.getByTestId("attachment-menu")).toBeTruthy();
+  });
+
+  it("does not report empty dropped files as consumed for the Codex route", () => {
+    mockCopilotLlmAuthProvider = "codex";
+    const onDroppedFilesConsumed = vi.fn();
+    render(
+      <ChatInput
+        onSend={mockOnSend}
+        droppedFiles={[]}
+        onDroppedFilesConsumed={onDroppedFilesConsumed}
+      />,
+    );
+
+    expect(onDroppedFilesConsumed).not.toHaveBeenCalled();
+  });
+
+  it("hides the route selector when only one subsidized transport is connected", () => {
+    mockFlagValue = true;
+    const { rerender } = render(<ChatInput onSend={mockOnSend} />);
+    expect(screen.queryByLabelText(/AI connection:/i)).toBeNull();
+
+    rerender(<ChatInput onSend={mockOnSend} hasSession />);
+    expect(screen.queryByLabelText(/AI connection:/i)).toBeNull();
+  });
+});
+
+describe("ChatInput queue button", () => {
+  it("does not render queue button when not streaming", () => {
+    render(<ChatInput onSend={mockOnSend} onEnqueue={vi.fn()} />);
+    expect(screen.queryByLabelText(/queue message/i)).toBeNull();
+  });
+
+  it("does not render queue button when streaming but no text typed", () => {
+    render(<ChatInput onSend={mockOnSend} onEnqueue={vi.fn()} isStreaming />);
+    expect(screen.queryByLabelText(/queue message/i)).toBeNull();
+  });
+
+  it("renders queue button when streaming with text and onEnqueue provided", () => {
+    render(<ChatInput onSend={mockOnSend} onEnqueue={vi.fn()} isStreaming />);
+    const textarea = screen.getByTestId("textarea");
+    fireEvent.change(textarea, { target: { value: "follow-up question" } });
+    expect(screen.getByLabelText(/queue message/i)).toBeDefined();
+  });
+
+  it("calls onEnqueue with trimmed text when queue button clicked", async () => {
+    const mockOnEnqueue = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ChatInput onSend={mockOnSend} onEnqueue={mockOnEnqueue} isStreaming />,
+    );
+    const textarea = screen.getByTestId("textarea");
+    fireEvent.change(textarea, { target: { value: "  hello  " } });
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText(/queue message/i));
+    });
+    expect(mockOnEnqueue).toHaveBeenCalledWith("hello");
+  });
+
+  it("clears textarea after successful enqueue", async () => {
+    const mockOnEnqueue = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ChatInput onSend={mockOnSend} onEnqueue={mockOnEnqueue} isStreaming />,
+    );
+    const textarea = screen.getByTestId("textarea");
+    fireEvent.change(textarea, { target: { value: "my message" } });
+    fireEvent.click(screen.getByLabelText(/queue message/i));
+    await waitFor(() => {
+      expect((textarea as HTMLTextAreaElement).value).toBe("");
+    });
+  });
+
+  it("preserves textarea text if queue button clicked with empty input", async () => {
+    const mockOnEnqueue = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ChatInput onSend={mockOnSend} onEnqueue={mockOnEnqueue} isStreaming />,
+    );
+    const textarea = screen.getByTestId("textarea");
+    // No text typed — queue button should not render
+    expect(screen.queryByLabelText(/queue message/i)).toBeNull();
+    // onEnqueue must not be called
+    expect(mockOnEnqueue).not.toHaveBeenCalled();
+    // textarea stays empty
+    expect((textarea as HTMLTextAreaElement).value).toBe("");
+  });
+});
+
+describe("ChatInput Enter while streaming", () => {
+  // Enter submits the form (CredentialMentionEditor calls requestSubmit), so
+  // these drive the submit event directly.
+  it("queues the text instead of sending it, and clears the box", async () => {
+    const onEnqueue = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={mockOnSend} onEnqueue={onEnqueue} isStreaming />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "  and then?  " } });
+    await act(async () => {
+      fireEvent.submit(textarea.closest("form")!);
+    });
+    expect(onEnqueue).toHaveBeenCalledWith("and then?");
+    expect(mockOnSend).not.toHaveBeenCalled();
+    expect(textarea.value).toBe("");
+  });
+
+  it("queues while an earlier send from this composer is still streaming", async () => {
+    // The composer's own send guard holds until the whole answer has
+    // streamed; Enter must not be stuck behind it.
+    const onSend = vi.fn(() => new Promise<void>(() => {}));
+    const onEnqueue = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <ChatInput onSend={onSend} onEnqueue={onEnqueue} />,
+    );
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "write an essay" } });
+    await act(async () => {
+      fireEvent.submit(textarea.closest("form")!);
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    rerender(<ChatInput onSend={onSend} onEnqueue={onEnqueue} isStreaming />);
+    fireEvent.change(textarea, { target: { value: "then say PINEAPPLE" } });
+    await act(async () => {
+      fireEvent.submit(textarea.closest("form")!);
+    });
+    expect(onEnqueue).toHaveBeenCalledWith("then say PINEAPPLE");
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(textarea.value).toBe("");
+  });
+
+  it("puts the text back and toasts when queueing fails", async () => {
+    const onEnqueue = vi
+      .fn()
+      .mockRejectedValue(new Error("Session has no active turn"));
+    render(<ChatInput onSend={mockOnSend} onEnqueue={onEnqueue} isStreaming />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "and then?" } });
+    await act(async () => {
+      fireEvent.submit(textarea.closest("form")!);
+    });
+    expect(textarea.value).toBe("and then?");
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Couldn't send message",
+        variant: "destructive",
+      }),
+    );
+  });
+
+  it("ignores a second Enter while the first queue request is pending", async () => {
+    let settle: (() => void) | undefined;
+    const onEnqueue = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    render(<ChatInput onSend={mockOnSend} onEnqueue={onEnqueue} isStreaming />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "first" } });
+    const form = textarea.closest("form")!;
+    fireEvent.submit(form);
+    fireEvent.change(textarea, { target: { value: "second" } });
+    fireEvent.submit(form);
+    expect(onEnqueue).toHaveBeenCalledTimes(1);
+    expect(textarea.value).toBe("second");
+    await act(async () => {
+      settle?.();
+    });
+  });
+
+  it("keeps attachments on the send path, which the queue cannot carry", async () => {
+    // Attachments are added between turns (paste is ignored mid-stream);
+    // the turn then starts from elsewhere, e.g. a question card answer.
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    const onEnqueue = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <ChatInput onSend={onSend} onEnqueue={onEnqueue} />,
+    );
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [new File(["png"], "shot.png", { type: "image/png" })],
+      },
+    });
+    rerender(<ChatInput onSend={onSend} onEnqueue={onEnqueue} isStreaming />);
+    fireEvent.change(textarea, { target: { value: "see attached" } });
+    await act(async () => {
+      fireEvent.submit(textarea.closest("form")!);
+    });
+    expect(onEnqueue).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith(
+      "see attached",
+      [expect.any(File)],
+      undefined,
+    );
+  });
+
+  it("hides the queue button while attachments are present", async () => {
+    const { rerender } = render(
+      <ChatInput onSend={mockOnSend} onEnqueue={vi.fn()} />,
+    );
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [new File(["png"], "shot.png", { type: "image/png" })],
+      },
+    });
+    rerender(<ChatInput onSend={mockOnSend} onEnqueue={vi.fn()} isStreaming />);
+    fireEvent.change(textarea, { target: { value: "see attached" } });
+    expect(screen.queryByLabelText(/queue message/i)).toBeNull();
+  });
+
+  it("falls back to a normal send when nothing can queue", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} isStreaming />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    await act(async () => {
+      fireEvent.submit(textarea.closest("form")!);
+    });
+    expect(onSend).toHaveBeenCalledWith("hello", undefined, undefined);
+  });
+});
+
+describe("ChatInput dry-run toggle", () => {
+  it("does not render dry-run toggle when flag is disabled", () => {
+    mockFlagValue = false;
+    render(<ChatInput onSend={mockOnSend} />);
+    expect(screen.queryByTestId("dry-run-toggle")).toBeNull();
+  });
+
+  it("renders dry-run toggle when flag is enabled and no session", () => {
+    mockFlagValue = true;
+    render(<ChatInput onSend={mockOnSend} hasSession={false} />);
+    expect(screen.getByTestId("dry-run-toggle")).toBeDefined();
+  });
+
+  it("hides dry-run toggle when session is active and isDryRun is false", () => {
+    mockFlagValue = true;
+    render(<ChatInput onSend={mockOnSend} hasSession />);
+    // isDryRun is false in mock, hasSession is true → toggle hidden
+    expect(screen.queryByTestId("dry-run-toggle")).toBeNull();
+  });
+
+  it("calls setIsDryRun and shows toast when dry-run toggled", async () => {
+    const { toast } = await import("@/components/molecules/Toast/use-toast");
+    mockFlagValue = true;
+    render(<ChatInput onSend={mockOnSend} />);
+    fireEvent.click(screen.getByTestId("dry-run-toggle"));
+    // isDryRun was false → next is true
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Test mode enabled",
+      }),
+    );
+  });
+});
+
+describe("ChatInput guided prompt prefill", () => {
+  it("prefills the composer and focuses it when an initial prompt arrives after mount", async () => {
+    const { rerender } = render(<ChatInput onSend={mockOnSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    textarea.blur();
+    expect(document.activeElement).not.toBe(textarea);
+
+    mockInitialPrompt = "Teach me a new skill";
+    rerender(<ChatInput onSend={mockOnSend} />);
+
+    await waitFor(() => {
+      expect(textarea.value).toBe("Teach me a new skill");
+    });
+    expect(document.activeElement).toBe(textarea);
+    expect(mockSetInitialPrompt).toHaveBeenCalledWith(null);
+  });
+
+  it("replaces the current draft when a new guided prompt arrives", async () => {
+    const { rerender } = render(<ChatInput onSend={mockOnSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+    mockInitialPrompt = NEW_SKILL_PROMPT;
+    rerender(<ChatInput onSend={mockOnSend} />);
+    await waitFor(() => {
+      expect(textarea.value).toBe(NEW_SKILL_PROMPT);
+    });
+
+    mockInitialPrompt = NEW_SCHEDULED_TASK_PROMPT;
+    rerender(<ChatInput onSend={mockOnSend} />);
+    await waitFor(() => {
+      expect(textarea.value).toBe(NEW_SCHEDULED_TASK_PROMPT);
+    });
+  });
+
+  it("clears an untouched guided prompt when the menu discards it", async () => {
+    const { rerender } = render(<ChatInput onSend={mockOnSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+    mockInitialPrompt = NEW_SKILL_PROMPT;
+    rerender(<ChatInput onSend={mockOnSend} />);
+    await waitFor(() => {
+      expect(textarea.value).toBe(NEW_SKILL_PROMPT);
+    });
+
+    fireEvent.click(screen.getByTestId("attachment-menu"));
+
+    await waitFor(() => {
+      expect(textarea.value).toBe("");
+    });
+  });
+
+  it("keeps a user-edited draft when the menu asks to discard", async () => {
+    const { rerender } = render(<ChatInput onSend={mockOnSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+    mockInitialPrompt = NEW_SKILL_PROMPT;
+    rerender(<ChatInput onSend={mockOnSend} />);
+    await waitFor(() => {
+      expect(textarea.value).toBe(NEW_SKILL_PROMPT);
+    });
+
+    fireEvent.change(textarea, {
+      target: { value: `${NEW_SKILL_PROMPT} plus my edits` },
+    });
+
+    fireEvent.click(screen.getByTestId("attachment-menu"));
+
+    expect(textarea.value).toBe(`${NEW_SKILL_PROMPT} plus my edits`);
+  });
+});
+
+describe("ChatInput submit behavior", () => {
+  it("does not call onSend when textarea is empty", () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const form = screen.getByTestId("submit").closest("form")!;
+    fireEvent.submit(form);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("sends trimmed value and clears textarea", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "  hello  " } });
+    const form = textarea.closest("form")!;
+    fireEvent.submit(form);
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith("hello", undefined, undefined);
+    });
+    await waitFor(() => {
+      expect(textarea.value).toBe("");
+    });
+  });
+
+  it("clears the textarea on submit, without waiting for the stream to end", async () => {
+    // onSend resolves only when the whole assistant turn finishes, so a
+    // clear-after-await left the sent message sitting in the composer for
+    // the entire stream.
+    let finishStream: (() => void) | undefined;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishStream = resolve;
+        }),
+    );
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(textarea.value).toBe("");
+    });
+    expect(onSend).toHaveBeenCalledWith("hello", undefined, undefined);
+    await act(async () => {
+      finishStream?.();
+    });
+  });
+
+  it("clears attachment chips on submit, without waiting for the stream to end", async () => {
+    let finishStream: (() => void) | undefined;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishStream = resolve;
+        }),
+    );
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [new File(["png"], "shot.png", { type: "image/png" })],
+      },
+    });
+    // An attachment alone makes the message sendable, so the submit button
+    // going back to disabled is proof the chips were dropped.
+    await waitFor(() => {
+      expect((screen.getByTestId("submit") as HTMLButtonElement).disabled).toBe(
+        false,
+      );
+    });
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect((screen.getByTestId("submit") as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+    });
+    expect(onSend).toHaveBeenCalledWith("", [expect.any(File)], undefined);
+    await act(async () => {
+      finishStream?.();
+    });
+  });
+
+  it("does not call onSend when disabled", () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} disabled />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    const form = textarea.closest("form")!;
+    fireEvent.submit(form);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("prevents double-submit while a send is in flight", async () => {
+    let resolveFirst: (() => void) | undefined;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    const form = textarea.closest("form")!;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveFirst?.();
+    });
+  });
+
+  it("allows sending again after a failed send", async () => {
+    let failNext = true;
+    const onSend = vi.fn(async () => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("fail");
+      }
+    });
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    const form = textarea.closest("form")!;
+    fireEvent.submit(form);
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalled();
+    });
+    fireEvent.change(textarea, { target: { value: "retry" } });
+    fireEvent.submit(form);
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledTimes(2);
+    });
+    expect(onSend).toHaveBeenLastCalledWith("retry", undefined, undefined);
+  });
+});
+
+describe("ChatInput send failure", () => {
+  it("toasts and puts the failed message back in the composer", async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error("Backend exploded"));
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(textarea.value).toBe("hello");
+    });
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Couldn't send message",
+        description: expect.stringContaining("Backend exploded"),
+        variant: "destructive",
+      }),
+    );
+  });
+
+  it("keeps a draft typed during the stream alongside the failed message", async () => {
+    let rejectSend: ((error: Error) => void) | undefined;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "first message" } });
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(textarea.value).toBe("");
+    });
+    fireEvent.change(textarea, { target: { value: "second thought" } });
+    await act(async () => {
+      rejectSend?.(new Error("nope"));
+    });
+
+    expect(textarea.value).toContain("first message");
+    expect(textarea.value).toContain("second thought");
+  });
+
+  it("does not toast when the send succeeds", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+    expect(textarea.value).toBe("");
+    expect(toast).not.toHaveBeenCalled();
+  });
+});
+
+describe("ChatInput clipboard paste", () => {
+  function pasteFiles(target: HTMLElement, files: File[]) {
+    return fireEvent.paste(target, { clipboardData: { files } });
+  }
+
+  it("attaches a pasted image and sends it with the message", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+    const image = new File(["png-bytes"], "image.png", { type: "image/png" });
+    pasteFiles(textarea, [image]);
+
+    fireEvent.change(textarea, { target: { value: "see screenshot" } });
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+    const [message, files, workspaceFiles] = onSend.mock.calls[0];
+    expect(message).toBe("see screenshot");
+    expect(files).toHaveLength(1);
+    expect(files[0].name).toMatch(/^pasted-image-.+\.png$/);
+    expect(files[0].type).toBe("image/png");
+    expect(workspaceFiles).toBeUndefined();
+  });
+
+  it("allows sending a pasted image without any text", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+    const image = new File(["png-bytes"], "image.png", { type: "image/png" });
+    pasteFiles(textarea, [image]);
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+    const [message, files] = onSend.mock.calls[0];
+    expect(message).toBe("");
+    expect(files).toHaveLength(1);
+  });
+
+  it("keeps the original name of pasted non-generic files", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+    const pdf = new File(["pdf-bytes"], "report.pdf", {
+      type: "application/pdf",
+    });
+    pasteFiles(textarea, [pdf]);
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+    expect(onSend.mock.calls[0][1][0].name).toBe("report.pdf");
+  });
+
+  it("does not rename non-image files with generic image names", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+    pasteFiles(textarea, [
+      new File(["pdf-bytes"], "image.pdf", { type: "application/pdf" }),
+    ]);
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+    expect(onSend.mock.calls[0][1][0].name).toBe("image.pdf");
+  });
+
+  it("gives images from separate pastes in the same second distinct names", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseTime = new Date("2026-01-01T10:00:00.100Z");
+      vi.setSystemTime(baseTime);
+      const onSend = vi.fn().mockResolvedValue(undefined);
+      render(<ChatInput onSend={onSend} />);
+      const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+      pasteFiles(textarea, [
+        new File(["a"], "image.png", { type: "image/png" }),
+      ]);
+      vi.setSystemTime(new Date("2026-01-01T10:00:00.900Z"));
+      pasteFiles(textarea, [
+        new File(["b"], "image.png", { type: "image/png" }),
+      ]);
+
+      vi.useRealTimers();
+      fireEvent.submit(textarea.closest("form")!);
+      await waitFor(() => {
+        expect(onSend).toHaveBeenCalledTimes(1);
+      });
+      const files = onSend.mock.calls[0][1] as File[];
+      expect(files).toHaveLength(2);
+      expect(files[0].name).not.toBe(files[1].name);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives multiple generic pasted images distinct names", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+
+    pasteFiles(textarea, [
+      new File(["a"], "image.png", { type: "image/png" }),
+      new File(["b"], "image.png", { type: "image/png" }),
+    ]);
+    fireEvent.submit(textarea.closest("form")!);
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+    const files = onSend.mock.calls[0][1] as File[];
+    expect(files).toHaveLength(2);
+    expect(files[0].name).not.toBe(files[1].name);
+  });
+
+  it("prevents the default paste when files are attached", () => {
+    render(<ChatInput onSend={mockOnSend} />);
+    const textarea = screen.getByTestId("textarea");
+    const image = new File(["png-bytes"], "image.png", { type: "image/png" });
+    const notCancelled = pasteFiles(textarea, [image]);
+    expect(notCancelled).toBe(false);
+  });
+
+  it("leaves plain-text paste untouched", () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} />);
+    const textarea = screen.getByTestId("textarea");
+    const notCancelled = pasteFiles(textarea, []);
+    expect(notCancelled).toBe(true);
+    fireEvent.submit(textarea.closest("form")!);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("does not attach pasted files while uploading", () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput onSend={onSend} isUploadingFiles />);
+    const textarea = screen.getByTestId("textarea");
+    const image = new File(["png-bytes"], "image.png", { type: "image/png" });
+    const notCancelled = pasteFiles(textarea, [image]);
+    expect(notCancelled).toBe(true);
+  });
+});
+
+interface StopHarnessProps {
+  sessionId: string | null;
+  sdkStop: () => void;
+  setMessages: (
+    updater: ((prev: UIMessage[]) => UIMessage[]) | UIMessage[],
+  ) => void;
+  setIsUserStopping: (value: boolean) => void;
+}
+
+function StopHarness({
+  sessionId,
+  sdkStop,
+  setMessages,
+  setIsUserStopping,
+}: StopHarnessProps) {
+  const isUserStoppingRef = useRef(false);
+  const stop = useCopilotStop({
+    sessionId,
+    stopStream: sdkStopStream(sdkStop, setMessages),
+    isUserStoppingRef,
+    setIsUserStopping,
+  });
+  return <ChatInput onSend={vi.fn()} isStreaming onStop={stop} />;
+}
+
+function asstMessage(parts: UIMessage["parts"], id = "a1"): UIMessage {
+  return { id, role: "assistant", parts };
+}
+
+describe("ChatInput stop button", () => {
+  it("appends a cancellation marker to the trailing assistant message", async () => {
+    mockCancel.mockResolvedValue({ status: 200, data: { reason: "ok" } });
+    let messages: UIMessage[] = [
+      asstMessage([{ type: "text", text: "partial reply", state: "done" }]),
+    ];
+    const setMessages = vi.fn((updater: unknown) => {
+      if (typeof updater === "function") {
+        messages = (updater as (prev: UIMessage[]) => UIMessage[])(messages);
+      } else {
+        messages = updater as UIMessage[];
+      }
+    });
+
+    render(
+      <StopHarness
+        sessionId="sess-1"
+        sdkStop={vi.fn()}
+        setMessages={setMessages}
+        setIsUserStopping={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("stop"));
+
+    await waitFor(() => {
+      const last = messages[messages.length - 1];
+      const tail = last.parts[last.parts.length - 1];
+      expect(tail.type).toBe("text");
+      expect((tail as { text: string }).text).toContain("Operation cancelled");
+    });
+  });
+
+  it("leaves messages unchanged when there is no trailing assistant message", async () => {
+    mockCancel.mockResolvedValue({ status: 200, data: { reason: "ok" } });
+    let messages: UIMessage[] = [
+      {
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "hi", state: "done" }],
+      },
+    ];
+    const setMessages = vi.fn((updater: unknown) => {
+      if (typeof updater === "function") {
+        messages = (updater as (prev: UIMessage[]) => UIMessage[])(messages);
+      } else {
+        messages = updater as UIMessage[];
+      }
+    });
+
+    render(
+      <StopHarness
+        sessionId="sess-1"
+        sdkStop={vi.fn()}
+        setMessages={setMessages}
+        setIsUserStopping={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("stop"));
+
+    await waitFor(() => {
+      expect(mockCancel).toHaveBeenCalled();
+    });
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("user");
+  });
+
+  it("aborts the SDK stream and flips the user-stopping flag when clicked", async () => {
+    mockCancel.mockResolvedValue({ status: 200, data: { reason: "ok" } });
+    const sdkStop = vi.fn();
+    const setIsUserStopping = vi.fn();
+
+    render(
+      <StopHarness
+        sessionId="sess-1"
+        sdkStop={sdkStop}
+        setMessages={vi.fn()}
+        setIsUserStopping={setIsUserStopping}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("stop"));
+
+    await waitFor(() => {
+      expect(sdkStop).toHaveBeenCalledTimes(1);
+      expect(setIsUserStopping).toHaveBeenCalledWith(true);
+    });
+  });
+
+  it("still proceeds with cancel if sdkStop throws", async () => {
+    mockCancel.mockResolvedValue({ status: 200, data: { reason: "ok" } });
+    const sdkStop = vi.fn(() => {
+      throw new Error("no fetch in flight");
+    });
+
+    const swallowWindow = (e: PromiseRejectionEvent) => e.preventDefault();
+    const swallowProcess = () => undefined;
+    window.addEventListener("unhandledrejection", swallowWindow);
+    process.on("unhandledRejection", swallowProcess);
+    try {
+      render(
+        <StopHarness
+          sessionId="sess-1"
+          sdkStop={sdkStop}
+          setMessages={vi.fn()}
+          setIsUserStopping={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByTestId("stop"));
+
+      await waitFor(() => {
+        expect(mockCancel).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      window.removeEventListener("unhandledrejection", swallowWindow);
+      process.off("unhandledRejection", swallowProcess);
+    }
+  });
+
+  it("does not call the cancel endpoint when there is no active sessionId", async () => {
+    const setIsUserStopping = vi.fn();
+    render(
+      <StopHarness
+        sessionId={null}
+        sdkStop={vi.fn()}
+        setMessages={vi.fn()}
+        setIsUserStopping={setIsUserStopping}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("stop"));
+    await waitFor(() => {
+      expect(setIsUserStopping).toHaveBeenCalledWith(true);
+    });
+    expect(mockCancel).not.toHaveBeenCalled();
+  });
+
+  it("toasts a 'Stop may take a moment' notice on cancel_published_not_confirmed", async () => {
+    const { toast } = await import("@/components/molecules/Toast/use-toast");
+    mockCancel.mockResolvedValue({
+      status: 200,
+      data: { reason: "cancel_published_not_confirmed" },
+    });
+
+    render(
+      <StopHarness
+        sessionId="sess-1"
+        sdkStop={vi.fn()}
+        setMessages={vi.fn()}
+        setIsUserStopping={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("stop"));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Stop may take a moment" }),
+      );
+    });
+  });
+
+  it("toasts a destructive notice when the cancel request rejects", async () => {
+    const { toast } = await import("@/components/molecules/Toast/use-toast");
+    mockCancel.mockRejectedValue(new Error("network down"));
+
+    render(
+      <StopHarness
+        sessionId="sess-1"
+        sdkStop={vi.fn()}
+        setMessages={vi.fn()}
+        setIsUserStopping={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("stop"));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Could not stop the task",
+          variant: "destructive",
+        }),
+      );
+    });
+  });
+
+  it("does not toast when the cancel succeeds with a normal reason", async () => {
+    const { toast } = await import("@/components/molecules/Toast/use-toast");
+    mockCancel.mockResolvedValue({ status: 200, data: { reason: "ok" } });
+
+    render(
+      <StopHarness
+        sessionId="sess-1"
+        sdkStop={vi.fn()}
+        setMessages={vi.fn()}
+        setIsUserStopping={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("stop"));
+
+    await waitFor(() => {
+      expect(mockCancel).toHaveBeenCalled();
+    });
+    expect(toast).not.toHaveBeenCalled();
+  });
+});
+
+describe("ChatInput voice mode", () => {
+  it("hands the composer over to the voice bar", () => {
+    const { rerender } = render(
+      <ChatInput onSend={mockOnSend} sessionId="session-1" />,
+    );
+    const textarea = screen.getByTestId("textarea");
+    expect(isShown(textarea)).toBe(true);
+
+    rerender(
+      <ChatInput
+        onSend={mockOnSend}
+        sessionId="session-1"
+        voiceBar={<div data-testid="voice-bar" />}
+      />,
+    );
+
+    // Typing, attaching and sending do nothing hands-free, so the whole
+    // control row goes rather than each button being disabled in place.
+    expect(screen.getByTestId("voice-bar")).toBeDefined();
+    expect(isShown(textarea)).toBe(false);
+  });
+
+  it("gives the composer back, with the draft intact", () => {
+    const { rerender } = render(
+      <ChatInput
+        onSend={mockOnSend}
+        sessionId="session-1"
+        voiceBar={<div data-testid="voice-bar" />}
+      />,
+    );
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "half a thought" } });
+
+    rerender(<ChatInput onSend={mockOnSend} sessionId="session-1" />);
+
+    expect(screen.queryByTestId("voice-bar")).toBeNull();
+    expect(isShown(textarea)).toBe(true);
+    expect(textarea.value).toBe("half a thought");
+  });
+});
+
+describe("ChatInput transcription failure", () => {
+  const mockOnSend = vi.fn();
+
+  it("offers a retry and the recording itself when transcription fails", () => {
+    mockTranscriptionError = "Transcription service unavailable";
+    mockHasFailedRecording = true;
+    render(<ChatInput onSend={mockOnSend} />);
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Transcription service unavailable",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^Retry$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Download recording/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+    expect(voiceRetry).toHaveBeenCalledTimes(1);
+    expect(voiceDownload).toHaveBeenCalledTimes(1);
+    expect(voiceDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the row up while the retry is in flight", () => {
+    // It must not blink away and back: that takes the Retry button with it
+    // and makes a slow retry look like it did nothing.
+    mockTranscriptionError = "Transcription failed";
+    mockHasFailedRecording = true;
+    mockIsTranscribing = true;
+    render(<ChatInput onSend={mockOnSend} />);
+
+    expect(screen.getByRole("alert")).toBeDefined();
+    expect(
+      screen.getByRole("button", { name: /^Retry$/ }).hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
+  it("renders in the card composer too", () => {
+    // The empty-state composer stacks its rows and supplies its own spacing.
+    mockTranscriptionError = "Transcription failed";
+    mockHasFailedRecording = true;
+    render(<ChatInput onSend={mockOnSend} stacked />);
+
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Transcription failed",
+    );
+  });
+
+  it("says nothing when there is no failed recording to act on", () => {
+    render(<ChatInput onSend={mockOnSend} />);
+
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("stays out of voice mode's way", () => {
+    // Voice mode replaces the composer's controls; a dictation error from
+    // before it was entered must not squat on top of the voice bar.
+    mockTranscriptionError = "Transcription failed";
+    mockHasFailedRecording = true;
+    render(
+      <ChatInput onSend={mockOnSend} voiceBar={<div data-testid="bar" />} />,
+    );
+
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/** `display: none` on an ancestor, which `toBeVisible` cannot see in jsdom. */
+function isShown(element: HTMLElement): boolean {
+  return !element.closest(".hidden");
+}
+
+describe("ChatInput with no AI connection", () => {
+  afterEach(() => {
+    mockTransports = undefined;
+  });
+
+  function serverWithNoModel() {
+    mockTransports = {
+      status: 200,
+      data: {
+        transports: [
+          {
+            auth_provider: "platform",
+            available: false,
+            credential_id: null,
+          },
+        ],
+      },
+    };
+  }
+
+  it("says how to connect a model, with the server setup guide", () => {
+    serverWithNoModel();
+    render(<ChatInput onSend={vi.fn()} />);
+
+    const notice = screen.getByRole("status", { name: "No AI connection" });
+    expect(notice.textContent).toContain("No AI model is connected");
+    expect(
+      screen.getByRole("link", { name: /setup guide/i }).getAttribute("href"),
+    ).toContain("single-container.md#models-and-memory");
+  });
+
+  it("stays out of the way once a model can answer", () => {
+    mockTransports = {
+      status: 200,
+      data: {
+        transports: [
+          { auth_provider: "platform", available: true, credential_id: null },
+        ],
+      },
+    };
+    render(<ChatInput onSend={vi.fn()} />);
+
+    expect(screen.queryByRole("status", { name: "No AI connection" })).toBe(
+      null,
+    );
+  });
+
+  it("keeps the draft and adds no second toast for a failure already shown", async () => {
+    serverWithNoModel();
+    const onSend = vi
+      .fn()
+      .mockRejectedValue(new ReportedSendError("No AI connection is set up"));
+    render(<ChatInput onSend={onSend} />);
+
+    const textarea = screen.getByTestId("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "Hi there" } });
+    await act(async () => {
+      fireEvent.submit(textarea.closest("form")!);
+    });
+
+    expect(onSend).toHaveBeenCalledWith("Hi there", undefined, undefined);
+    await waitFor(() => expect(textarea.value).toBe("Hi there"));
+    expect(toast).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("status", { name: "No AI connection" }),
+    ).toBeDefined();
+  });
+});

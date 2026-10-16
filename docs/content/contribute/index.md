@@ -1,48 +1,33 @@
 # Contributing to the Docs
 
-We welcome contributions to our documentation! If you would like to contribute, please follow the steps below.
+We welcome contributions to our documentation! Our docs are hosted on GitBook and published from GitHub.
 
-## Setting up the Docs
+## How It Works
 
-1. Clone the repository:
+- Documentation lives in the `docs/` directory and changes like any other code: through a pull request to `dev`
+- The published docs match `master`. When a release reaches `master`, its `docs/` directory is copied to the `gitbook` branch, and GitBook publishes that
+- The `gitbook` branch belongs to that copy. Don't open pull requests against it, and don't edit pages in GitBook: the next copy overwrites anything that isn't in `master`
 
-    ```shell
-    git clone github.com/Significant-Gravitas/AutoGPT.git
-    ```
+## Editing Docs Locally
 
-1. Install the dependencies:
-
-    ```shell
-    python -m pip install -r docs/requirements.txt
-    ```
-
-    or
+1. Clone the repository and create a branch from `dev`:
 
     ```shell
-    python3 -m pip install -r docs/requirements.txt
+    git clone https://github.com/Significant-Gravitas/AutoGPT.git
+    cd AutoGPT
+    git checkout -b my-docs-change origin/dev
     ```
 
-1. Start iterating using mkdocs' live server:
+2. Make your changes to markdown files in `docs/`
 
-    ```shell
-    mkdocs serve
-    ```
+3. Preview changes with any markdown preview tool
 
-1. Open your browser and navigate to `http://127.0.0.1:8000`.
+## Adding a New Page
 
-1. The server will automatically reload the docs when you save your changes.
-
-## Adding a new page
-
-1. Create a new markdown file in the `docs/content` directory.
-1. Add the new page to the `nav` section in the `mkdocs.yml` file.
-1. Add the content to the new markdown file.
-1. Run `mkdocs serve` to see your changes.
-
-## Checking links
-
-To check for broken links in the documentation, run `mkdocs build` and look for warnings in the console output.
+1. Create a new markdown file in the appropriate `docs/` subdirectory
+2. Add the new page to the relevant `SUMMARY.md` file to include it in the navigation
+3. Submit a pull request to the `dev` branch
 
 ## Submitting a Pull Request
 
-When you're ready to submit your changes, please create a pull request. We will review your changes and merge them if they are appropriate.
+When you're ready to submit your changes, create a pull request targeting the `dev` branch. We will review your changes and merge them if appropriate. They appear on the published docs with the next release.

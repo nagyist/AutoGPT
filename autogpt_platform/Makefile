@@ -1,0 +1,78 @@
+.PHONY: start-core stop-core logs-core format lint migrate publish-skills run-backend run-frontend load-store-agents
+
+# Run just Postgres + Redis + RabbitMQ
+start-core:
+	docker compose up -d deps
+
+# Stop core services
+stop-core:
+	docker compose stop 
+
+reset-db:
+	docker compose stop db
+	rm -rf data/db/data
+	cd backend && poetry run prisma migrate deploy
+	cd backend && poetry run prisma generate
+	cd backend && poetry run gen-prisma-stub
+	
+# View logs for core services
+logs-core:
+	docker compose logs -f deps
+
+# Run formatting and linting for backend and frontend
+format:
+	cd backend && poetry run format
+	cd frontend && pnpm format
+	cd frontend && pnpm lint
+
+# Create any missing .env from its .env.default, then fill the secrets that
+# .env.default deliberately leaves blank (see single-container/runtime_config.py
+# SECRET_GENERATORS). Safe to re-run: existing files and existing values are
+# never overwritten.
+init-env:
+	cp -n .env.default .env || true
+	cd backend && cp -n .env.default .env || true
+	cd frontend && cp -n .env.default .env || true
+	python3 single-container/runtime_config.py fill-env --missing-ok --path .env
+	python3 single-container/runtime_config.py fill-env --missing-ok --path backend/.env
+	python3 single-container/runtime_config.py fill-env --missing-ok --path frontend/.env
+
+
+# Run migrations for backend
+migrate:
+	cd backend && poetry run prisma migrate deploy
+	cd backend && poetry run prisma generate
+	cd backend && poetry run gen-prisma-stub
+
+# Publish the skills catalog (marketplace skills + expert roster) into the
+# local database. Experts get their preload workflows only if the store assets
+# are loaded first (`make load-store-agents`); without them the experts still
+# land, minus those workflows, and a later run fills them in.
+publish-skills:
+	cd backend && poetry run publish-skills-catalog --skip-missing-preloads
+
+run-backend:
+	cd backend && poetry run app
+
+run-frontend:
+	cd frontend && pnpm dev
+
+test-data:
+	cd backend && poetry run python test/test_data_creator.py
+
+load-store-agents:
+	cd backend && poetry run load-store-agents
+
+help:
+	@echo "Usage: make <target>"
+	@echo "Targets:"
+	@echo "  start-core - Start just the core services (Postgres, Redis, RabbitMQ) in background"
+	@echo "  stop-core - Stop the core services"
+	@echo "  reset-db - Reset the database by deleting the volume"
+	@echo "  logs-core - Tail the logs for core services"
+	@echo "  format - Format & lint backend (Python) and frontend (TypeScript) code"
+	@echo "  migrate - Run backend database migrations"
+	@echo "  run-backend - Run the backend FastAPI server"
+	@echo "  run-frontend - Run the frontend Next.js development server"
+	@echo "  test-data - Run the test data creator"
+	@echo "  load-store-agents - Load store agents from agents/ folder into test database"

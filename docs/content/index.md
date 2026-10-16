@@ -58,16 +58,18 @@ Blocks represent actions and are the building blocks of your workflows, includin
 - Custom scripts or functions
 - Conditional logic and decision-making components
 
-You can learn more under: [Build your own Blocks](platform/new_blocks.md)
+You can learn more under: [Build your own Blocks](../platform/new_blocks.md)
 
 ## Available Language Models
 
 The platform comes pre-integrated with cutting-edge LLM providers:
 
-- OpenAI
-- Anthropic
-- Groq
-- Llama
+- OpenAI - https://openai.com/
+- Anthropic - https://www.anthropic.com/
+- Groq - https://groq.com/
+- Llama - https://llamaindex.ai/
+- AI/ML API - [https://aimlapi.com/](https://aimlapi.com/?utm_source=autogpt&utm_medium=github&utm_campaign=integration)
+  - AI/ML API provides 300+ AI models including Deepseek, Gemini, ChatGPT. The models run at enterprise-grade rate limits and uptimes.
 
 ## License Overview 
 
@@ -80,6 +82,6 @@ This strategy allows us to share previously closed-source components, fostering 
 
 ## Ready to Get Started?
 
-- Read the [Getting Started docs](https://docs.agpt.co/platform/getting-started/) to self-host
+- Read the [Getting Started docs](https://agpt.co/docs/platform/getting-started) to self-host
 - [Join the waitlist](https://agpt.co/waitlist) for the cloud-hosted beta
 - [Contribute](contribute/index.md)

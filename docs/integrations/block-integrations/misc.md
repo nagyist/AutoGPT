@@ -1,0 +1,1443 @@
+# Misc
+<!-- MANUAL: file_description -->
+Miscellaneous blocks including agent execution, scheduling, HTTP requests, webhooks, and other utility functions.
+<!-- END MANUAL -->
+
+## Agent Executor
+
+### What it is
+Executes an existing agent inside your agent
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block runs another agent as a sub-agent within your workflow. You provide the agent's graph ID, version, and input data, and the block executes that agent and returns its outputs.
+
+Input and output schemas define the expected data structure for communication between the parent and child agents, enabling modular, reusable agent composition.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| user_id | User ID | str | Yes |
+| graph_id | Graph ID | str | Yes |
+| graph_version | Graph Version | int | Yes |
+| agent_name | Name to display in the Builder UI | str | No |
+| inputs | Input data for the graph | Dict[str, Any] | Yes |
+| input_schema | Input schema for the graph | Dict[str, Any] | Yes |
+| output_schema | Output schema for the graph | Dict[str, Any] | Yes |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Modular Workflows**: Break complex workflows into smaller, reusable agents that can be composed together.
+
+**Specialized Agents**: Call domain-specific agents (like a research agent or formatter) from a main orchestration agent.
+
+**Dynamic Routing**: Execute different agents based on input type or user preferences.
+<!-- END MANUAL -->
+
+---
+
+## Approve Reddit Post
+
+### What it is
+Approves a Reddit post or comment from the mod queue. Requires 'modposts' scope. Reddit scopes are account-wide, so this grants the ability across every subreddit you moderate, not only the one set here.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block requires a prefixed Reddit thing ID — `t3_...` for a post or `t1_...` for a comment — and loads the matching PRAW object before calling the moderator `approve()` action with credentials that include the `modposts` scope. Bare IDs are rejected: posts and comments share an ID namespace, so an unprefixed ID could resolve to an unrelated object.
+
+On success, the block returns the original `post_id` and `success=True`. `Mod Queue` emits prefixed IDs on its `post_id` output, so the two blocks chain directly without losing whether the item started as a comment or a submission.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_id | Post or comment to approve. Full Reddit thing ID, prefixed with 't3_' for a post (e.g. 't3_abc123') or 't1_' for a comment (e.g. 't1_xyz789'). Bare IDs are rejected: posts and comments share an ID namespace, so an unprefixed ID cannot be resolved safely. | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| post_id | ID of the approved post (pass-through) | str |
+| success | Whether the approval succeeded | bool |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**False Positive Cleanup**: Approve items from the mod queue after an external classifier determines they are safe.
+
+**Appeal Handling**: Restore a previously filtered post or comment after a moderator reviews a user appeal.
+
+**Hybrid Moderation**: Combine automated queue scoring with a final approval step for borderline content.
+<!-- END MANUAL -->
+
+---
+
+## AutoPilot
+
+### What it is
+Execute tasks using AutoGPT AutoPilot with full access to platform tools (agent management, workspace files, web fetch, block execution, and more). Enables sub-agent patterns and scheduled autopilot execution.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block invokes the platform's copilot system directly via `stream_chat_completion_sdk`. It creates (or resumes) a chat session, streams the autopilot's response collecting text deltas, tool call details, and token usage, then returns the aggregated results. A recursion depth guard prevents infinite loops when the autopilot calls this block as a sub-agent.
+
+Tool and block identifiers provided in `tools` and `blocks` are validated at run time before any execution begins — unknown names or UUIDs produce an error output immediately. When valid, the permissions object is passed into the SDK layer, which narrows the `allowed_tools` list sent to Claude; blocks are enforced at the `run_block` tool call site so the copilot cannot circumvent the filter by calling `run_block` directly. For sub-agent patterns (where an autopilot invokes another AutoPilot block), permissions are inherited: the child's effective allowed set is intersected with the parent's, so a sub-agent can only be *more* restrictive than its parent, never more permissive.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| prompt | The task or instruction for the autopilot to execute. The autopilot has access to platform tools like agent management, workspace files, web fetch, block execution, and more. | str | Yes |
+| system_context | Optional additional context prepended to the prompt. Use this to constrain autopilot behavior, provide domain context, or set output format requirements. | str | No |
+| transport | Run on platform credits, or on your connected ChatGPT subscription if supported by your plan. | "platform" \| "codex_app_server" | No |
+| session_id | Session ID to continue an existing autopilot conversation. Leave empty to start a new session. Use the session_id output from a previous run to continue. | str | No |
+| max_recursion_depth | Maximum nesting depth when the autopilot calls this block recursively (sub-agent pattern). Prevents infinite loops. | int | No |
+| tools | Tool names to filter. Works with tools_exclude to form an allow-list or deny-list. Leave empty to apply no tool filter. | List["add_understanding" \| "ask_question" \| "bash_exec" \| "browser_act" \| "browser_navigate" \| "browser_screenshot" \| "confirm_expert_change" \| "confirm_expert_soul_update" \| "connect_integration" \| "consult_teammate" \| "create_agent" \| "create_feature_request" \| "create_folder" \| "customize_agent" \| "decompose_goal" \| "delegate_to_expert" \| "delete_folder" \| "delete_preset" \| "delete_schedule" \| "delete_skill" \| "delete_workspace_file" \| "describe_capability" \| "edit_agent" \| "edit_chat_platform_message" \| "enter_agent_building_mode" \| "expert_onboarding" \| "find_agent" \| "find_capability" \| "find_library_agent" \| "find_session" \| "fix_agent_graph" \| "get_agent_building_guide" \| "get_doc_page" \| "get_platform_info" \| "get_sub_session_result" \| "grant_expert_credential" \| "handoff_to_expert" \| "hire_expert" \| "install_expert_workflow" \| "list_agent_triggers" \| "list_chat_platform_channels" \| "list_expert_chats" \| "list_expert_credentials" \| "list_expert_workflows" \| "list_folders" \| "list_presets" \| "list_routines" \| "list_schedules" \| "list_skills" \| "list_team" \| "list_workspace_files" \| "memory_forget_confirm" \| "memory_forget_search" \| "memory_search" \| "memory_store" \| "message_session" \| "move_agents_to_folder" \| "move_folder" \| "pause_schedule" \| "post_to_chat_platform" \| "raise_expert" \| "read_expert_chat" \| "read_skill" \| "read_workspace_file" \| "remove_expert_workflow" \| "request_credential_grant" \| "resume_capability" \| "resume_schedule" \| "revoke_expert_credential" \| "run_agent" \| "run_capability" \| "run_sub_session" \| "schedule_followup" \| "schedule_routine" \| "search_docs" \| "search_feature_requests" \| "setup_agent_webhook_trigger" \| "start_desktop" \| "store_skill" \| "update_expert" \| "update_expert_soul" \| "update_folder" \| "update_preset" \| "validate_agent_graph" \| "view_agent_output" \| "web_fetch" \| "web_search" \| "write_workspace_file" \| "run_block" \| "run_mcp_tool" \| "Agent" \| "Edit" \| "Glob" \| "Grep" \| "Read" \| "Task" \| "TodoWrite" \| "WebSearch" \| "Write"] | No |
+| tools_exclude | Controls how the 'tools' list is interpreted. True (default): 'tools' is a deny-list — listed tools are blocked, all others are allowed. An empty 'tools' list means allow everything. False: 'tools' is an allow-list — only listed tools are permitted. | bool | No |
+| blocks | Block identifiers to filter when the copilot runs blocks via run_capability. Each entry can be: a block name (e.g. 'HTTP Request'), a full block UUID, or the first 8 hex characters of the UUID (e.g. 'c069dc6b'). Works with blocks_exclude. Leave empty to apply no block filter. | List[str] | No |
+| blocks_exclude | Controls how the 'blocks' list is interpreted. True (default): 'blocks' is a deny-list — listed blocks are blocked, all others are allowed. An empty 'blocks' list means allow everything. False: 'blocks' is an allow-list — only listed blocks are permitted. | bool | No |
+| dry_run | When enabled, run_capability and run_agent tool calls in this autopilot session are forced to use dry-run simulation mode. No real API calls, side effects, or credits are consumed by those tools. Useful for testing agent wiring and previewing outputs. Only applies when creating a new session (session_id is empty). When reusing an existing session_id, the session's original dry_run setting is preserved. | bool | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| response | The final text response from the autopilot. | str |
+| tool_calls | List of tools called during execution. Each entry has tool_call_id, tool_name, input, output, and success fields. | List[ToolCallEntry] |
+| conversation_history | Current turn messages (user prompt + assistant reply) as JSON. It can be used for logging or analysis. | str |
+| session_id | Session ID for this conversation. Pass this back to continue the conversation in a future run. | str |
+| token_usage | Token usage statistics: prompt_tokens, completion_tokens, total_tokens. | TokenUsage |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Scheduled Reports**: Schedule an autopilot to run daily that checks workspace files, summarizes recent agent activity, and posts a report.
+
+**Multi-Step AI Workflows**: Chain autopilot blocks where one gathers data and another analyzes it, enabling complex AI pipelines within the graph editor.
+
+**Sub-Agent Delegation**: Delegate a research or formatting task to a sub-autopilot while the parent agent handles orchestration.
+<!-- END MANUAL -->
+
+---
+
+## Ban Subreddit User
+
+### What it is
+Bans a user from a subreddit. Requires 'modcontributors' scope. Reddit scopes are account-wide, so this grants the ability across every subreddit you moderate, not only the one set here.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+The input schema bounds the optional `duration` to 1–999 days (Reddit's cap for temporary bans) and caps the internal `reason`, `mod_note`, and user-facing `ban_message` fields at Reddit's moderation limits, so invalid values are rejected before any API call is made. The block then calls `sub.banned.add(...)`, optionally including a temporary duration and a `ban_message`.
+
+The outputs echo the target user and subreddit, plus `success` and a derived `permanent` flag so downstream steps can branch on temporary versus permanent bans. Use `reason` and `mod_note` for internal moderation context, and reserve `ban_message` for the explanation shown to the banned user.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit to ban the user from, excluding the /r/ prefix | str | Yes |
+| username | Reddit username to ban (without the u/ prefix) | str | Yes |
+| duration | Ban duration in days (1-999, Reddit's cap for temporary bans). Leave blank for a permanent ban. | int | No |
+| reason | Internal moderator-only ban reason (max 100 chars). Use ban_message to explain the ban to the user. | str | No |
+| mod_note | Internal moderator note (not shown to the user) | str | No |
+| ban_message | Optional custom message sent to the user explaining the ban | str | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| username | Banned username (pass-through) | str |
+| subreddit | Subreddit (pass-through) | str |
+| success | Whether the ban was applied | bool |
+| permanent | True if the ban is permanent | bool |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Escalation Workflow**: Ban repeat offenders automatically after multiple confirmed moderation violations.
+
+**Temporary Cooldown**: Apply short bans during heated incidents while moderators review the situation.
+
+**Policy Enforcement**: Pair user reporting or detection blocks with standardized ban actions and messaging.
+<!-- END MANUAL -->
+
+---
+
+## Create Reddit Post
+
+### What it is
+Create a new post on a subreddit. Can create text posts or link posts.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to create a new post in the specified subreddit. Provide the title and either text content for a self-post or a URL for a link post. Optionally apply flair using a flair ID from the GetSubredditFlairsBlock.
+
+The block returns the created post's ID and URL, which can be used for chaining with comment blocks or monitoring.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit to post to, excluding the /r/ prefix | str | Yes |
+| title | Title of the post | str | Yes |
+| content | Body text of the post (for text posts) | str | No |
+| url | URL to submit (for link posts). If provided, content is ignored. | str | No |
+| flair_id | Flair template ID to apply to the post (from GetSubredditFlairsBlock) | str | No |
+| flair_text | Custom flair text (only used if the flair template allows editing) | str | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| post_id | ID of the created post | str |
+| post_url | URL of the created post | str |
+| subreddit | The subreddit name (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Content Distribution**: Automatically share articles or content to relevant subreddits.
+
+**Community Engagement**: Post updates or announcements to subreddit communities.
+
+**Automated Posting**: Schedule and post content to Reddit based on workflow triggers.
+<!-- END MANUAL -->
+
+---
+
+## Delete Reddit Comment
+
+### What it is
+Delete a Reddit comment that you own.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to delete a comment you previously posted. The deletion is permanent and removes the comment from the post thread. You can only delete your own comments.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| comment_id | The ID of the comment to delete (must be your own comment) | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if deletion failed | str |
+| success | Whether the deletion was successful | bool |
+| comment_id | The comment ID (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Content Cleanup**: Remove outdated or incorrect comments from discussions.
+
+**Automated Moderation**: Delete comments that fail quality checks or receive negative feedback.
+<!-- END MANUAL -->
+
+---
+
+## Delete Reddit Post
+
+### What it is
+Delete a Reddit post that you own.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to delete a post you previously created. The deletion is permanent and removes the post from the subreddit. You can only delete your own posts.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_id | The ID of the post to delete (must be your own post) | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if deletion failed | str |
+| success | Whether the deletion was successful | bool |
+| post_id | The post ID (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Content Management**: Remove posts that are no longer relevant or contain errors.
+
+**Automated Cleanup**: Delete posts based on performance metrics or time-based rules.
+<!-- END MANUAL -->
+
+---
+
+## Edit Reddit Post
+
+### What it is
+Edit the body text of an existing Reddit post that you own. Only works for self/text posts.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to edit the body text of a self-post you created. Link posts cannot be edited. The new content replaces the existing post body.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_id | The ID of the post to edit (must be your own post) | str | Yes |
+| new_content | The new body text for the post | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the edit failed | str |
+| success | Whether the edit was successful | bool |
+| post_id | The post ID (pass-through for chaining) | str |
+| post_url | URL of the edited post | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Content Updates**: Update posts with new information or corrections.
+
+**Dynamic Content**: Modify post content based on changing data or feedback.
+<!-- END MANUAL -->
+
+---
+
+## Execute Code
+
+### What it is
+Executes code in a sandbox environment with internet access.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block executes Python, JavaScript, or Bash code in an isolated E2B sandbox with internet access. Use setup_commands to install dependencies before running your code.
+
+The sandbox includes pip and npm pre-installed. Set timeout to limit execution time, and use dispose_sandbox to clean up after execution or keep the sandbox running for follow-up steps.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| setup_commands | Shell commands to set up the sandbox before running the code. You can use `curl` or `git` to install your desired Debian based package manager. `pip` and `npm` are pre-installed.  These commands are executed with `sh`, in the foreground. | List[str] | No |
+| variables | Variables defined here can be used directly in your code. Each key (`variables_#_{name}`) is injected directly as a local variable with the same name (`{name}`) in your code. Values wired in from other blocks keep their type; default values set on this node come in as strings, so parse them in your code if you need a number or other type. | Dict[str, Any] | No |
+| code | Code to execute in the sandbox | str | No |
+| language | Programming language to execute | "python" \| "js" \| "bash" \| "r" \| "java" | No |
+| timeout | Execution timeout in seconds | int | No |
+| dispose_sandbox | Whether to dispose of the sandbox immediately after execution. If disabled, the sandbox will run until its timeout expires. | bool | No |
+| template_id | You can use an E2B sandbox template by entering its ID here. Check out the E2B docs for more details: [E2B - Sandbox template](https://e2b.dev/docs/sandbox-template) | str | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| main_result | The main result from the code execution (the script's final expression). Its `json` sub-field is ONLY populated when the result is a dict/object/map — bare lists, strings, and numbers land in `text` as a string instead. To pass structured data downstream via `main_result_#_json_#_<key>` links, end the script with a key-value structure in the script's language (e.g. `{'items': my_list}` in Python, `({items: myList})` in JavaScript). | Main Result |
+| results | List of results from the code execution | List[CodeExecutionResult] |
+| response | Text output (if any) of the main execution result | str |
+| stdout_logs | Standard output logs from execution | str |
+| stderr_logs | Standard error logs from execution | str |
+| files | Files created or modified during execution. Each file has path, name, content, and workspace_ref (if stored). | List[SandboxFileOutput] |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Data Processing**: Run Python scripts to transform, analyze, or visualize data that can't be handled by standard blocks.
+
+**Custom Integrations**: Execute code to call APIs or services not covered by built-in blocks.
+
+**Dynamic Computation**: Generate and execute code based on AI suggestions for flexible problem-solving.
+<!-- END MANUAL -->
+
+---
+
+## Execute Code Step
+
+### What it is
+Execute code in a previously instantiated sandbox.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block executes additional code in a sandbox that was previously created with the Instantiate Code Sandbox block. The sandbox maintains state between steps, so variables and installed packages persist.
+
+Use this for multi-step code execution where each step builds on previous results. Set dispose_sandbox to true on the final step to clean up.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| sandbox_id | ID of the sandbox instance to execute the code in | str | Yes |
+| step_code | Code to execute in the sandbox | str | No |
+| language | Programming language to execute | "python" \| "js" \| "bash" \| "r" \| "java" | No |
+| dispose_sandbox | Whether to dispose of the sandbox after executing this code. | bool | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| main_result | The main result from the code execution (the script's final expression). Its `json` sub-field is ONLY populated when the result is a dict/object/map — bare lists, strings, and numbers land in `text` as a string instead. To pass structured data downstream via `main_result_#_json_#_<key>` links, end the script with a key-value structure in the script's language (e.g. `{'items': my_list}` in Python, `({items: myList})` in JavaScript). | Main Result |
+| results | List of results from the code execution | List[CodeExecutionResult] |
+| response | Text output (if any) of the main execution result | str |
+| stdout_logs | Standard output logs from execution | str |
+| stderr_logs | Standard error logs from execution | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Iterative Processing**: Load data in one step, transform it in another, and export in a third.
+
+**Stateful Computation**: Build up results across multiple code executions with shared variables.
+
+**Interactive Analysis**: Run exploratory data analysis steps sequentially in the same environment.
+<!-- END MANUAL -->
+
+---
+
+## Get Reddit Comment
+
+### What it is
+Get details about a specific Reddit comment by its ID.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to retrieve detailed information about a specific comment by its ID. Returns the comment content, author, score, timestamp, and other metadata.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| comment_id | The ID of the comment to fetch | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if comment couldn't be fetched | str |
+| comment | The comment details | RedditComment |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Comment Analysis**: Analyze specific comments for sentiment or content moderation.
+
+**Thread Tracking**: Monitor specific comments for engagement or replies.
+<!-- END MANUAL -->
+
+---
+
+## Get Reddit Comment Replies
+
+### What it is
+Get replies to a specific Reddit comment.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to fetch replies to a specific comment. Returns a list of direct replies with their content, authors, and metadata.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| comment_id | The ID of the comment to get replies from | str | Yes |
+| post_id | The ID of the post containing the comment | str | Yes |
+| limit | Maximum number of replies to fetch (max 50) | int | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if replies couldn't be fetched | str |
+| reply | A reply to the comment | RedditComment |
+| replies | All replies | List[RedditComment] |
+| comment_id | The parent comment ID (pass-through for chaining) | str |
+| post_id | The post ID (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Conversation Threading**: Build complete comment threads for analysis or display.
+
+**Response Monitoring**: Track replies to your comments for engagement purposes.
+<!-- END MANUAL -->
+
+---
+
+## Get Reddit Inbox
+
+### What it is
+Get messages, mentions, and comment replies from your Reddit inbox.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to fetch items from your Reddit inbox. Filter by type to get all items, unread only, direct messages, username mentions, or replies to your comments.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| inbox_type | Type of inbox items to fetch | "all" \| "unread" \| "messages" \| "mentions" \| "comment_replies" | No |
+| limit | Maximum number of items to fetch | int | No |
+| mark_read | Whether to mark fetched items as read | bool | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if fetch failed | str |
+| item | An inbox item | RedditInboxItem |
+| items | All fetched items | List[RedditInboxItem] |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Inbox Monitoring**: Check for new messages or mentions to respond to.
+
+**Engagement Tracking**: Monitor comment replies to stay engaged with discussions.
+<!-- END MANUAL -->
+
+---
+
+## Get Reddit Post
+
+### What it is
+Get detailed information about a specific Reddit post by its ID.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to retrieve complete details about a specific post by its ID. Returns the post title, content, author, score, comment count, and other metadata.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_id | The ID of the post to fetch (e.g., 'abc123' or full ID 't3_abc123') | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the post couldn't be fetched | str |
+| post | Detailed post information | RedditPostDetails |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Post Analysis**: Analyze specific posts for content quality or engagement metrics.
+
+**Content Verification**: Verify post details before interacting with it programmatically.
+<!-- END MANUAL -->
+
+---
+
+## Get Reddit Post Comments
+
+### What it is
+Get top-level comments on a Reddit post.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to fetch top-level comments on a post. Configure the sort order and limit to control which comments are returned.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_id | The ID of the post to get comments from | str | Yes |
+| limit | Maximum number of top-level comments to fetch (max 100) | int | No |
+| sort | Sort order for comments | "best" \| "top" \| "new" \| "controversial" \| "old" \| "qa" | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if comments couldn't be fetched | str |
+| comment | A comment on the post | RedditComment |
+| comments | All fetched comments | List[RedditComment] |
+| post_id | The post ID (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Sentiment Analysis**: Analyze comments to gauge community sentiment on a topic.
+
+**Content Moderation**: Review comments for compliance with community guidelines.
+<!-- END MANUAL -->
+
+---
+
+## Get Reddit Posts
+
+### What it is
+This block fetches Reddit posts from a defined subreddit name.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+The block connects to Reddit using provided credentials, accesses the specified subreddit, and retrieves posts based on the given parameters. It can limit the number of posts, stop at a specific post, or fetch posts within a certain time frame.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit name, excluding the /r/ prefix | str | No |
+| last_minutes | Post time to stop minutes ago while fetching posts | int | No |
+| last_post | Post ID to stop when reached while fetching posts | str | No |
+| post_limit | Number of posts to fetch | int | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| post | Reddit post | RedditPost |
+| posts | List of all Reddit posts | List[RedditPost] |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+A content curator could use this block to gather recent posts from a specific subreddit for analysis, summarization, or inclusion in a newsletter.
+<!-- END MANUAL -->
+
+---
+
+## Get Reddit User Info
+
+### What it is
+Get information about a Reddit user including karma, account age, and verification status.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to retrieve public profile information about a Reddit user, including karma scores, account age, and verification status.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| username | The Reddit username to look up (without /u/ prefix) | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if user lookup failed | str |
+| user | User information | RedditUserInfo |
+| username | The username (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**User Verification**: Check user account age and karma before engaging.
+
+**User Research**: Gather user profile data for analysis or outreach decisions.
+<!-- END MANUAL -->
+
+---
+
+## Get Subreddit Flairs
+
+### What it is
+Get available link flair options for a subreddit.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to retrieve available link flair options for a subreddit. Use the flair IDs with the Create Reddit Post block to apply flair to your posts.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit name (without /r/ prefix) | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if fetch failed | str |
+| flair | A flair option | SubredditFlair |
+| flairs | All available flairs | List[SubredditFlair] |
+| subreddit | The subreddit name (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Post Preparation**: Get available flairs before creating posts to ensure proper categorization.
+
+**Flair Selection**: Present flair options to users or select appropriate flair programmatically.
+<!-- END MANUAL -->
+
+---
+
+## Get Subreddit Info
+
+### What it is
+Get information about a subreddit including subscriber count, description, and rules.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to retrieve metadata about a subreddit including subscriber count, description, creation date, and posting rules.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit name (without /r/ prefix) | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the subreddit couldn't be fetched | str |
+| info | Subreddit information | SubredditInfo |
+| subreddit | The subreddit name (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Subreddit Research**: Analyze subreddits before deciding to post or engage.
+
+**Community Analysis**: Compare subreddit sizes and activity for market research.
+<!-- END MANUAL -->
+
+---
+
+## Get Subreddit Rules
+
+### What it is
+Get the rules for a subreddit to ensure compliance before posting.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to retrieve the posting rules for a subreddit. Review these rules before posting to ensure compliance.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit name (without /r/ prefix) | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if fetch failed | str |
+| rule | A subreddit rule | SubredditRule |
+| rules | All subreddit rules | List[SubredditRule] |
+| subreddit | The subreddit name (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Compliance Check**: Review rules before automated posting to avoid violations.
+
+**Content Guidelines**: Display rules to users before they submit content to a subreddit.
+<!-- END MANUAL -->
+
+---
+
+## Get User Posts
+
+### What it is
+Fetch posts by a specific Reddit user.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to fetch posts submitted by a specific user. Configure sort order and limit to control which posts are returned.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| username | Reddit username to fetch posts from (without /u/ prefix) | str | Yes |
+| post_limit | Maximum number of posts to fetch | int | No |
+| sort | Sort order for user posts | "new" \| "hot" \| "top" \| "controversial" | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if posts couldn't be fetched | str |
+| post | A post by the user | RedditPost |
+| posts | All posts by the user | List[RedditPost] |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**User Analysis**: Analyze a user's posting history for content patterns or topics.
+
+**Influencer Research**: Research prolific posters in specific communities.
+<!-- END MANUAL -->
+
+---
+
+## Instantiate Code Sandbox
+
+### What it is
+Instantiate a sandbox environment with internet access in which you can execute code with the Execute Code Step block.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block creates a persistent E2B sandbox environment that can be used for multiple code execution steps. Run setup_commands and setup_code to prepare the environment with dependencies and initial state.
+
+The sandbox persists until its timeout expires or it's explicitly disposed. Use the returned sandbox_id with Execute Code Step blocks for subsequent code execution.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| setup_commands | Shell commands to set up the sandbox before running the code. You can use `curl` or `git` to install your desired Debian based package manager. `pip` and `npm` are pre-installed.  These commands are executed with `sh`, in the foreground. | List[str] | No |
+| setup_code | Code to execute in the sandbox | str | No |
+| language | Programming language to execute | "python" \| "js" \| "bash" \| "r" \| "java" | No |
+| timeout | Execution timeout in seconds | int | No |
+| template_id | You can use an E2B sandbox template by entering its ID here. Check out the E2B docs for more details: [E2B - Sandbox template](https://e2b.dev/docs/sandbox-template) | str | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| sandbox_id | ID of the sandbox instance | str |
+| response | Text result (if any) of the setup code execution | str |
+| stdout_logs | Standard output logs from execution | str |
+| stderr_logs | Standard error logs from execution | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Complex Pipelines**: Set up an environment with data science libraries for multi-step analysis.
+
+**Persistent State**: Create a sandbox with loaded models or data that multiple workflow branches can access.
+
+**Custom Environments**: Configure specialized environments with specific package versions for reproducible execution.
+<!-- END MANUAL -->
+
+---
+
+## Lock Reddit Post
+
+### What it is
+Locks or unlocks a Reddit post or comment to prevent or allow replies. Requires 'modposts' scope. Reddit scopes are account-wide, so this grants the ability across every subreddit you moderate, not only the one set here.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block resolves the target `post_id` to the correct Reddit object from its `t3_` (post) or `t1_` (comment) prefix, so both can be locked or unlocked from the same input field; bare, unprefixed IDs are rejected as ambiguous. It then calls `lock()` when `lock=True` or `unlock()` when `lock=False`, using moderator credentials with the `modposts` scope.
+
+The block returns the original `post_id` plus the resulting `locked` state, which makes it useful in review pipelines where the moderation decision and final state need to be recorded explicitly.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_id | Post or comment to lock or unlock. Full Reddit thing ID, prefixed with 't3_' for a post (e.g. 't3_abc123') or 't1_' for a comment (e.g. 't1_xyz789'). Bare IDs are rejected: posts and comments share an ID namespace, so an unprefixed ID cannot be resolved safely. | str | Yes |
+| lock | True to lock (disable comments/replies), False to unlock | bool | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| post_id | ID of the post (pass-through) | str |
+| locked | Current lock state after the action | bool |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Thread Freeze**: Lock a post when discussion becomes abusive or starts attracting brigading.
+
+**Post-Resolution Cleanup**: Unlock a thread again after moderators have resolved the incident and want to reopen discussion.
+
+**Incident Playbooks**: Trigger lock or unlock actions automatically from moderation decision trees.
+<!-- END MANUAL -->
+
+---
+
+## Mod Queue
+
+### What it is
+Fetches the mod queue for a subreddit. Scalar outputs fan out once per queued post or comment; items emits the full batch once. Requires moderator access.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block calls `sub.mod.modqueue(...)` for the target subreddit, forwarding the optional `only` filter and the `limit` value (bounded to 1–100 so a single run can't fan out into an unbounded chain of paginated Reddit calls). Each returned PRAW item is normalized into a predictable dictionary with a fullname ID, detected item type, title fallback for comments, author, permalink, and moderator reason.
+
+The block emits every queue entry individually for fan-out workflows and also emits the full `items` list for batch processing. Because the `post_id` output keeps the Reddit fullname (`t1_...` or `t3_...`), downstream moderation blocks can safely act on comments and submissions without extra type checks.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit name, excluding the /r/ prefix | str | Yes |
+| limit | Maximum number of items to fetch from the mod queue (1-100) | int | No |
+| only | Filter to only submissions or only comments. Leave blank for both. | "submissions" \| "comments" | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| post_id | Full Reddit thing ID of a queued item, such as 't3_abc123' or 't1_xyz789' | str |
+| item_type | Whether the queued item is a comment or submission | "comment" \| "submission" |
+| post_title | Title of the queued item | str |
+| author | Username of the author | str |
+| permalink | Full Reddit permalink | str |
+| reason | Mod queue reason (if any) | str |
+| items | All queued items as a list. Emitted exactly once; an empty list signals that the queue was checked and had no items. | List[Dict[str, Any]] |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Queue Triage**: Pull the latest subreddit queue and route each item into approve, remove, or lock actions.
+
+**Moderator Dashboards**: Feed queued items into summaries, alerts, or external review systems for human moderators.
+
+**Policy Automation**: Filter only comments or only submissions when building specialized moderation pipelines.
+<!-- END MANUAL -->
+
+---
+
+## Post Reddit Comment
+
+### What it is
+This block posts a Reddit comment on a specified Reddit post.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+The block connects to Reddit using the provided credentials, locates the specified post, and then adds the given comment to that post.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_id | The ID of the post to comment on | str | Yes |
+| comment | The content of the comment to post | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| comment_id | Posted comment ID | str |
+| post_id | The post ID (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+An automated moderation system could use this block to post pre-defined responses or warnings on Reddit posts that violate community guidelines.
+<!-- END MANUAL -->
+
+---
+
+## Publish To Medium
+
+### What it is
+Publishes a post to Medium.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block publishes articles to Medium using their API. Provide the content in HTML or Markdown format along with a title, tags, and publishing options. The author_id can be obtained from Medium's /me API endpoint.
+
+Configure publish_status to publish immediately, save as draft, or make unlisted. The block returns the published post's ID and URL.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| author_id | The Medium AuthorID of the user. You can get this by calling the /me endpoint of the Medium API.  curl -H "Authorization: Bearer YOUR_ACCESS_TOKEN" https://api.medium.com/v1/me  The response will contain the authorId field. | str | No |
+| title | The title of your Medium post | str | Yes |
+| content | The main content of your Medium post | str | Yes |
+| content_format | The format of the content: 'html' or 'markdown' | str | Yes |
+| tags | List of tags for your Medium post (up to 5) | List[str] | Yes |
+| canonical_url | The original home of this content, if it was originally published elsewhere | str | No |
+| publish_status | The publish status | "public" \| "draft" \| "unlisted" | Yes |
+| license | The license of the post: 'all-rights-reserved', 'cc-40-by', 'cc-40-by-sa', 'cc-40-by-nd', 'cc-40-by-nc', 'cc-40-by-nc-nd', 'cc-40-by-nc-sa', 'cc-40-zero', 'public-domain' | str | No |
+| notify_followers | Whether to notify followers that the user has published | bool | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the post creation failed | str |
+| post_id | The ID of the created Medium post | str |
+| post_url | The URL of the created Medium post | str |
+| published_at | The timestamp when the post was published | int |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Content Syndication**: Automatically publish blog posts or newsletters to Medium to reach a wider audience.
+
+**AI Content Publishing**: Generate articles with AI and publish them directly to Medium.
+
+**Cross-Posting**: Republish existing content from other platforms to Medium with proper canonical URL attribution.
+<!-- END MANUAL -->
+
+---
+
+## Read RSS Feed
+
+### What it is
+Reads RSS feed entries from a given URL.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block fetches and parses RSS or Atom feeds from a URL. Filter entries by time_period to only get recent items. When run_continuously is enabled, the block polls the feed at the specified polling_rate interval.
+
+Each entry is output individually, enabling processing of new content as it appears. The block also outputs all entries as a list for batch processing.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| rss_url | The URL of the RSS feed to read | str | Yes |
+| time_period | The time period to check in minutes relative to the run block runtime, e.g. 60 would check for new entries in the last hour. | int | No |
+| polling_rate | The number of seconds to wait between polling attempts. | int | Yes |
+| run_continuously | Whether to run the block continuously or just once. | bool | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| entry | The RSS item | RSSEntry |
+| entries | List of all RSS entries | List[RSSEntry] |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**News Monitoring**: Track industry news feeds and process new articles for summarization or alerts.
+
+**Content Aggregation**: Collect posts from multiple RSS feeds for a curated digest or newsletter.
+
+**Blog Triggers**: Monitor a competitor's blog feed to trigger analysis or response workflows.
+<!-- END MANUAL -->
+
+---
+
+## Reddit Get My Posts
+
+### What it is
+Fetch posts created by the authenticated Reddit user (you).
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to fetch posts you've submitted to Reddit. Useful for managing or analyzing your own posting history.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_limit | Maximum number of posts to fetch | int | No |
+| sort | Sort order for posts | "new" \| "hot" \| "top" \| "controversial" | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if posts couldn't be fetched | str |
+| post | A post by you | RedditPost |
+| posts | All your posts | List[RedditPost] |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Content Management**: Review and manage your Reddit posting history.
+
+**Performance Tracking**: Analyze the engagement of your previous posts.
+<!-- END MANUAL -->
+
+---
+
+## Remove Reddit Post
+
+### What it is
+Removes a Reddit post or comment as a moderator. Requires 'modposts' scope. Reddit scopes are account-wide, so this grants the ability across every subreddit you moderate, not only the one set here.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block requires a prefixed Reddit thing ID (`t3_...` for a post, `t1_...` for a comment) and resolves it to the matching submission or comment before moderation; bare IDs are rejected because posts and comments share an ID namespace. It then calls `thing.mod.remove(...)`, forwarding the `spam` flag and the optional `mod_note`, which is capped at Reddit's 250-character moderator-note limit by the input schema.
+
+The block returns the original `post_id` and a success flag so workflows can record or branch on the removal decision. Passing through the prefixed IDs emitted by `Mod Queue` lets the same flow moderate queued comments and submissions without extra conversion.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| post_id | Post or comment to remove. Full Reddit thing ID, prefixed with 't3_' for a post (e.g. 't3_abc123') or 't1_' for a comment (e.g. 't1_xyz789'). Bare IDs are rejected: posts and comments share an ID namespace, so an unprefixed ID cannot be resolved safely. | str | Yes |
+| spam | Mark as spam (True) or just remove (False). Spam trains the filter. | bool | No |
+| mod_note | Optional internal moderator note visible only to mods | str | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| post_id | ID of the removed post (pass-through) | str |
+| success | Whether the removal succeeded | bool |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Spam Cleanup**: Remove obvious spam and optionally train Reddit's spam filter by marking it as spam.
+
+**Comment Moderation**: Use fullnames from `Mod Queue` to remove problematic comments without additional lookup steps.
+
+**Human-in-the-Loop Review**: Attach an internal moderator note when an automated rule removes borderline content.
+<!-- END MANUAL -->
+
+---
+
+## Reply To Reddit Comment
+
+### What it is
+Reply to a specific Reddit comment. Useful for threaded conversations.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to post a reply to an existing comment. The reply appears as a nested response in the comment thread.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| comment_id | The ID of the comment to reply to | str | Yes |
+| reply_text | The text content of the reply | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if reply failed | str |
+| comment_id | ID of the newly created reply | str |
+| parent_comment_id | The parent comment ID (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Automated Responses**: Reply to comments that mention your product or brand.
+
+**Conversation Engagement**: Participate in discussions by responding to relevant comments.
+<!-- END MANUAL -->
+
+---
+
+## Search Reddit
+
+### What it is
+Search Reddit for posts matching a query. Can search all of Reddit or a specific subreddit.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to search for posts matching your query. Optionally limit the search to a specific subreddit and configure sort order and time filters.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| query | Search query string | str | Yes |
+| subreddit | Limit search to a specific subreddit (without /r/ prefix) | str | No |
+| sort | Sort order for search results | "relevance" \| "hot" \| "top" \| "new" \| "comments" | No |
+| time_filter | Time filter for search results | "all" \| "day" \| "hour" \| "month" \| "week" \| "year" | No |
+| limit | Maximum number of results to return | int | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if search failed | str |
+| result | A search result | RedditSearchResult |
+| results | All search results | List[RedditSearchResult] |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Brand Monitoring**: Search for mentions of your product or company across Reddit.
+
+**Topic Research**: Find discussions about specific topics or keywords.
+<!-- END MANUAL -->
+
+---
+
+## Send Authenticated Web Request
+
+### What it is
+Make an authenticated HTTP request with host-scoped credentials (JSON / form / multipart).
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block makes HTTP requests with automatic credential injection based on the request URL's host. Credentials are managed separately and applied when the URL matches a configured host pattern.
+
+Supports JSON, form-encoded, and multipart requests with file uploads. The response is parsed and returned along with separate error outputs for client (4xx) and server (5xx) errors.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| url | The URL to send the request to | str | Yes |
+| method | The HTTP method to use for the request | "GET" \| "POST" \| "PUT" \| "DELETE" \| "PATCH" \| "OPTIONS" \| "HEAD" | No |
+| headers | The headers to include in the request | Dict[str, str] | No |
+| json_format | If true, send the body as JSON (unless files are also present). | bool | No |
+| body | Form/JSON body payload. If files are supplied, this must be a mapping of form‑fields. | Dict[str, Any] | No |
+| files_name | The name of the file field in the form data. | str | No |
+| files | Mapping of *form field name* → Image url / path / base64 url. | List[str (file)] | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Errors for all other exceptions | str |
+| response | The response from the server | Response |
+| client_error | Errors on 4xx status codes | Client Error |
+| server_error | Errors on 5xx status codes | Server Error |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Private API Access**: Call APIs that require authentication without exposing credentials in the workflow.
+
+**OAuth Integrations**: Access protected resources using pre-configured OAuth tokens.
+
+**Multi-Tenant APIs**: Make requests to APIs where credentials vary by host or endpoint.
+<!-- END MANUAL -->
+
+---
+
+## Send Email
+
+### What it is
+This block sends an email using the provided SMTP credentials.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block sends emails via SMTP using your configured email server credentials. Provide the recipient address, subject, and body content. The SMTP configuration includes server host, port, username, and password.
+
+The block handles connection, authentication, and message delivery, returning a status indicating success or failure.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| to_email | Recipient email address | str | Yes |
+| subject | Subject of the email | str | Yes |
+| body | Body of the email | str | Yes |
+| config | SMTP Config | SMTP Config | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the email sending failed | str |
+| status | Status of the email sending operation | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Notification Emails**: Send automated notifications when workflow events occur.
+
+**Report Delivery**: Email generated reports or summaries to stakeholders.
+
+**Alert System**: Send email alerts when monitoring workflows detect issues or thresholds.
+<!-- END MANUAL -->
+
+---
+
+## Send Mod Mail
+
+### What it is
+Sends a modmail message from a subreddit to a user. Requires 'modmail' scope. Reddit scopes are account-wide, so this grants the ability across every subreddit you moderate, not only the one set here.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block opens the target subreddit and creates a modmail conversation via `sub.modmail.create(...)` using the provided recipient, subject, and body. Because it uses the subreddit modmail endpoint, the credential must include the `modmail` scope and moderator access to that community.
+
+On success, the block returns the new conversation ID and `success=True`, which gives later steps a stable reference for logging or follow-up actions. Any Reddit API failure is surfaced through the standard `error` output.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit to send modmail from, excluding the /r/ prefix | str | Yes |
+| to_username | Username to send the modmail to (without u/ prefix) | str | Yes |
+| subject | Subject line of the modmail message | str | Yes |
+| body | Body of the modmail message | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| conversation_id | ID of the created modmail conversation | str |
+| success | Whether the modmail was sent | bool |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Appeal Responses**: Send official moderator replies when a user asks why content was removed or locked.
+
+**Proactive Outreach**: Notify a user about rule issues before escalating to stronger moderation actions.
+
+**Case Management**: Create modmail threads that can be referenced by later audit or follow-up steps.
+<!-- END MANUAL -->
+
+---
+
+## Send Reddit Message
+
+### What it is
+Send a private message (DM) to a Reddit user.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block uses the Reddit API via PRAW to send a private message to another Reddit user. The message appears in their inbox.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| username | The Reddit username to send a message to (without /u/ prefix) | str | Yes |
+| subject | The subject line of the message | str | Yes |
+| message | The body content of the message | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if sending failed | str |
+| success | Whether the message was sent | bool |
+| username | The username (pass-through for chaining) | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Outreach**: Send direct messages to users for collaboration or feedback requests.
+
+**Support**: Provide private support or follow-up to users who engaged with your content.
+<!-- END MANUAL -->
+
+---
+
+## Send Web Request
+
+### What it is
+Make an HTTP request (JSON / form / multipart).
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block makes HTTP requests to any URL. Configure the method (GET, POST, PUT, DELETE, PATCH), headers, and request body. Supports JSON, form-encoded, and multipart content types with file uploads.
+
+The response body is parsed and returned. Separate error outputs distinguish between client errors (4xx), server errors (5xx), and other failures.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| url | The URL to send the request to | str | Yes |
+| method | The HTTP method to use for the request | "GET" \| "POST" \| "PUT" \| "DELETE" \| "PATCH" \| "OPTIONS" \| "HEAD" | No |
+| headers | The headers to include in the request | Dict[str, str] | No |
+| json_format | If true, send the body as JSON (unless files are also present). | bool | No |
+| body | Form/JSON body payload. If files are supplied, this must be a mapping of form‑fields. | Dict[str, Any] | No |
+| files_name | The name of the file field in the form data. | str | No |
+| files | Mapping of *form field name* → Image url / path / base64 url. | List[str (file)] | No |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Errors for all other exceptions | str |
+| response | The response from the server | Response |
+| client_error | Errors on 4xx status codes | Client Error |
+| server_error | Errors on 5xx status codes | Server Error |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**API Integration**: Call REST APIs to fetch data, trigger actions, or send updates.
+
+**Webhook Delivery**: Send webhook notifications to external services when events occur.
+
+**Custom Services**: Integrate with services that don't have dedicated blocks using their HTTP APIs.
+<!-- END MANUAL -->
+
+---
+
+## Transcribe Youtube Video
+
+### What it is
+Transcribes a YouTube video using a proxy.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block extracts transcripts from YouTube videos using a proxy service. It parses the YouTube URL to get the video ID and retrieves the available transcript, typically the auto-generated or manually uploaded captions.
+
+The transcript text is returned as a single string, suitable for summarization, analysis, or other text processing.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| youtube_url | The URL of the YouTube video to transcribe | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Any error message if the transcription fails | str |
+| video_id | The extracted YouTube video ID | str |
+| transcript | The transcribed text of the video | str |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Video Summarization**: Extract video transcripts for AI summarization or key point extraction.
+
+**Content Repurposing**: Convert YouTube content into written articles, social posts, or documentation.
+
+**Research Automation**: Transcribe educational or informational videos for analysis and note-taking.
+<!-- END MANUAL -->
+
+---
+
+## Unban Subreddit User
+
+### What it is
+Unbans a user from a subreddit. Requires 'modcontributors' scope. Reddit scopes are account-wide, so this grants the ability across every subreddit you moderate, not only the one set here.
+
+### How it works
+<!-- MANUAL: how_it_works -->
+This block opens the target subreddit with moderator credentials and calls `sub.banned.remove(username)` to remove the user from the community ban list. It requires the `modcontributors` scope, and on success it returns the `username`, `subreddit`, and `success=True` so the unban can be audited or chained into follow-up actions such as notifications.
+
+Reddit is responsible for validating the username, subreddit, and moderator permissions. If the username is malformed, the subreddit is missing, or the credential does not have sufficient moderator access, the Reddit API error is surfaced through the block's standard `error` output. In practice, repeated unban attempts are typically safe to treat as idempotent workflow steps: if another moderator already removed the ban, the operation should be logged as a no-op for auditability, while transient API failures or rate limits should be retried with normal backoff before escalating to a human moderator.
+<!-- END MANUAL -->
+
+### Inputs
+
+| Input | Description | Type | Required |
+|-------|-------------|------|----------|
+| subreddit | Subreddit to unban the user from, excluding the /r/ prefix | str | Yes |
+| username | Reddit username to unban (without the u/ prefix) | str | Yes |
+
+### Outputs
+
+| Output | Description | Type |
+|--------|-------------|------|
+| error | Error message if the operation failed | str |
+| username | Unbanned username (pass-through) | str |
+| subreddit | Subreddit (pass-through) | str |
+| success | Whether the unban succeeded | bool |
+
+### Possible use case
+<!-- MANUAL: use_case -->
+**Appeal Resolution**: Restore access after a moderator approves a user's ban appeal.
+
+**Temporary Ban Expiry**: Pair scheduled workflows with unban actions when a manual review confirms the restriction should end.
+
+**Moderator Remediation**: Correct mistaken bans and immediately hand the result to a notification step.
+<!-- END MANUAL -->
+
+---

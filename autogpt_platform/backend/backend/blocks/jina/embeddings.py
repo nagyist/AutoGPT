@@ -1,16 +1,22 @@
-import requests
-
+from backend.blocks._base import (
+    Block,
+    BlockCategory,
+    BlockEffect,
+    BlockOutput,
+    BlockSchemaInput,
+    BlockSchemaOutput,
+)
 from backend.blocks.jina._auth import (
     JinaCredentials,
     JinaCredentialsField,
     JinaCredentialsInput,
 )
-from backend.data.block import Block, BlockCategory, BlockOutput, BlockSchema
-from backend.data.model import SchemaField
+from backend.data.model import NodeExecutionStats, SchemaField
+from backend.util.request import Requests
 
 
 class JinaEmbeddingBlock(Block):
-    class Input(BlockSchema):
+    class Input(BlockSchemaInput):
         texts: list = SchemaField(description="List of texts to embed")
         credentials: JinaCredentialsInput = JinaCredentialsField()
         model: str = SchemaField(
@@ -18,7 +24,7 @@ class JinaEmbeddingBlock(Block):
             default="jina-embeddings-v2-base-en",
         )
 
-    class Output(BlockSchema):
+    class Output(BlockSchemaOutput):
         embeddings: list = SchemaField(description="List of embeddings")
 
     def __init__(self):
@@ -28,9 +34,10 @@ class JinaEmbeddingBlock(Block):
             categories={BlockCategory.AI},
             input_schema=JinaEmbeddingBlock.Input,
             output_schema=JinaEmbeddingBlock.Output,
+            effect=BlockEffect.READ,
         )
 
-    def run(
+    async def run(
         self, input_data: Input, *, credentials: JinaCredentials, **kwargs
     ) -> BlockOutput:
         url = "https://api.jina.ai/v1/embeddings"
@@ -39,6 +46,14 @@ class JinaEmbeddingBlock(Block):
             "Authorization": f"Bearer {credentials.api_key.get_secret_value()}",
         }
         data = {"input": input_data.texts, "model": input_data.model}
-        response = requests.post(url, headers=headers, json=data)
-        embeddings = [e["embedding"] for e in response.json()["data"]]
+        response = await Requests().post(url, headers=headers, json=data)
+        resp_json = response.json()
+        embeddings = [e["embedding"] for e in resp_json["data"]]
+        usage = resp_json.get("usage", {})
+        if usage.get("total_tokens"):
+            self.merge_stats(
+                NodeExecutionStats(
+                    input_token_count=usage.get("total_tokens", 0),
+                )
+            )
         yield "embeddings", embeddings
